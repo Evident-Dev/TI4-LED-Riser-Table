@@ -3,18 +3,17 @@
 // Target: ESP32-S3-WROOM-1-N16R8
 //
 // Required libraries (Arduino IDE -> Library Manager):
-//   1. FastLED              (by Daniel Garcia)
-//   2. Adafruit MCP23X17    (by Adafruit)
-//   3. ESPAsyncWebServer    (GitHub: me-no-dev/ESPAsyncWebServer)
-//   4. AsyncTCP             (GitHub: me-no-dev/AsyncTCP)
+//   1. FastLED 3.10.3       (by Daniel Garcia) - 3.10.5 jams the LED driver
+//   2. ESP Async WebServer  (by ESP32Async)
+//   3. Async TCP            (by ESP32Async)
 //
 // Board: ESP32S3 Dev Module
 // CPU: 240 MHz (WiFi), Flash: 16MB QIO 80MHz, Partition: 16M Flash (3MB APP/9.9MB FATFS)
 // PSRAM: OPI PSRAM, USB CDC On Boot: Enabled, USB Mode: Hardware CDC and JTAG
 //
 // Core assignment:
-//   Core 0 — LED task (FastLED.show via I2S, ~60 fps) — isolated from WiFi jitter
-//   Core 1 — loop(): game state, keyboard, serial commands; AsyncWebServer runs here
+//   Core 0 — LED task (FastLED.show, ~33 fps) — isolated from WiFi jitter
+//   Core 1 — loop(): game state, web commands, serial commands; state broadcast task
 // =============================================================================
 
 #define BOARD_HAS_PSRAM
@@ -26,8 +25,6 @@
 #include "led_map.h"
 #include "edge_map.h"
 #include "hex_neighbors.h"
-// ESP32-S3 requires I2S peripheral for FastLED — must be defined before the include
-#define FASTLED_USES_ESP32S3_I2S
 #include "led_control.h"
 #include "keyboard_control.h"
 #include "animations.h"
