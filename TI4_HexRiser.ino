@@ -29,6 +29,7 @@
 #include "keyboard_control.h"
 #include "animations.h"
 #include "game_state.h"
+#include "map_state.h"
 #include "web_server.h"  // renamed from network.h — avoids collision with ESP32 core Network.h
 #include "save_state.h"
 
@@ -251,6 +252,7 @@ void setup() {
   // Game state — default 6 players; override with 'setplayers N'
   initGameState(6);
   initSaveState();  // a saved game waits for resume once boot finishes
+  initMapState();
 
   // Spawn LED task on Core 0 — takes over FastLED.show() from here on
   xTaskCreatePinnedToCore(
@@ -287,6 +289,7 @@ void loop() {
   drainWebCommands();  // key presses and admin commands from the web pages
   updateGameState();
   updateSaveState();
+  updateMapStorage();
 
   // Heartbeat
   static uint32_t lastHeartbeat = 0;

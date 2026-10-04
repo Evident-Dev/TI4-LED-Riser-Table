@@ -34,6 +34,7 @@
 #define LED_COLOR_ORDER     GRB    // SK6812 RGB channel order
 #define LED_UPDATE_MS       8     // ~60 FPS
 #define SIDE_GAP            4      // Side line inset (px); higher = more gap between hex colors
+#define THIN_SIDES          false  // Thinner LED side lines in the browser
 
 // -----------------------------------------------------------------------------
 // WiFi / Network
@@ -47,6 +48,8 @@
 // Fallback Access Point — used when home network is unavailable or skipped.
 #define WIFI_AP_SSID        "TI4-HexRiser"
 #define WIFI_AP_PASSWORD    "twilight4"
+#define NETWORK_HOSTNAME    "ti4table"  // reach the board at http://ti4table.local on any network
+#define KEEP_ACCESS_POINT   true        // keep the board's own WiFi on after joining a network
 
 // ESP32-DOWP-V3 built-in LED — GPIO 2 on most WROOM modules.
 // If your board has no built-in LED, this is harmless.

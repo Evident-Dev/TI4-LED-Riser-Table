@@ -70,7 +70,7 @@ The LED task pushes frames at most every 30 ms (~33 fps). 915 LEDs take about 28
 1. Open Serial Monitor at **115200 baud**
 2. The board will attempt to join the network saved in Settings (first boot uses the defaults in `config.h`), then fall back to AP mode
 3. Connect your phone or laptop to WiFi **"TI4-HexRiser"** (password: **"twilight4"**) if using AP mode
-4. Open a browser and navigate to the IP shown in Serial Monitor (AP mode default: `http://192.168.4.1`)
+4. Open **http://ti4table.local** in a browser, or the IP shown in Serial Monitor (AP mode: `http://192.168.4.1`)
 5. The hex grid should appear and sync live with the LED state via WebSocket
 
 ## Web Interface
@@ -84,9 +84,9 @@ If no game state arrives for 1 second the pages show a **Table offline** splash 
 | Page | Who | What |
 |---|---|---|
 | `/` | Everyone | Home page with links to Admin, Player and Projector |
-| `/projector` | Projector / TV | Full-screen live board mirror, display only |
-| `/play` (or `/player`) | Players 1-8 | Phone keypad: claim a seat, then a phase-aware pad (color select, strategy cards, end turn / pass / battle, ready, agenda) |
-| `/admin` | Game master | Desktop and mobile. Live board with hex claiming, player count, force start, reset, phase jumps, custom rules, seat roster with kick, speaker token, battle, lighting |
+| `/projector` | Projector / TV | Full-screen live board mirror with map tiles, player list, and faction icons on claimed hexes. Display only |
+| `/play` (or `/player`) | Players 1-8 | Phone keypad: claim a seat, then a phase-aware pad (faction and color select, strategy cards, end turn / pass / battle, ready, agenda) |
+| `/admin` | Game master | Desktop and mobile. Live board with map building and hex claiming, player count, force start, reset, phase jumps, custom rules, seat roster with kick, speaker token, battle, lighting |
 | `/settings` | — | WiFi, LED, debug, and display settings at runtime |
 
 ### Playing from phones
@@ -94,7 +94,21 @@ If no game state arrives for 1 second the pages show a **Table offline** splash 
 1. Game master opens `/admin` and sets the player count (this restarts setup and assigns home hexes)
 2. Each player opens `/play` on their phone, enters a name, and grabs an open seat
 3. Seats survive phone screen locks and reconnects — the claim token is stored in the browser
-4. Every keypad press goes through `handleGameKey()`, the same path as the `kb` serial command
+4. During setup, players can pick a faction. Its icon shows next to their name on the admin page and projector, and its home system appears on their home hex
+5. Every keypad press goes through `handleGameKey()`, the same path as the `kb` serial command
+
+### Map tiles
+
+Tile art and faction icons load from the [TI4 image CDN](https://evident-dev.github.io/TI4-Images/index.json). The board stores only tile numbers and faction ids. With no internet (AP mode), pages show plain hexes.
+
+The map can only be changed during setup, from the admin page:
+
+- **One hex:** tap a hex, type the tile number, then **Set Tile**. Hyperlanes get rotate buttons while selected.
+- **Whole map:** paste a TTS map string (for example from Milty Draft) and press **Load Map**. Mecatol Rex is added when the string leaves it out, and empty home spots fill in from each player's faction.
+
+The map is saved to flash and stays until **Clear Map**. Hex numbers show during setup and hide once the game starts.
+
+Claiming hexes is optional. Claiming the center hex marks the custodians token taken.
 
 ### Custom rules (admin page)
 
@@ -126,6 +140,8 @@ Saved settings override the defaults in `config.h`. Settings go back to the `con
 | Setting | Description |
 |---|---|
 | Network SSID / Password | WiFi network to connect to first |
+| Hostname | Name the board answers to on any network, as `http://<name>.local` (default `ti4table`) |
+| Keep AP On | Keep the board's own WiFi on after joining a network, so it's always reachable at `192.168.4.1` |
 | AP SSID / Password | Fallback access point credentials |
 | Network Timeout | How long to wait for the network before switching to AP |
 | Default Brightness | Startup brightness (0-255) |
@@ -133,6 +149,7 @@ Saved settings override the defaults in `config.h`. Settings go back to the `con
 | LED Update Rate | Animation tick interval in ms (30 ms minimum is enforced) |
 | Broadcast Rate | How often the board pushes state to the browser (ms) |
 | Side Gap | Inset of the colored side lines in the browser (0 = touching, higher = more gap) |
+| Side Width | Normal or Thin colored side lines in the browser |
 | Simulate Hardware | Skip FastLED.show() -- use this when testing without the strip connected |
 | Debug flags | Enable serial logging for various subsystems |
 
@@ -265,6 +282,8 @@ kb 1 15                 speaker ends agenda -- round resets, moves back to Strat
 | `settings_page.h` | Settings page HTML served at /settings |
 | `web_server.h` | WiFi station+AP, WebSocket state push, seat claims, command queue |
 | `save_state.h` | Power loss recovery: saves the running game to flash and restores it |
+| `map_state.h` | Tile number and rotation per hex, saved to flash |
+| `tile_script.h` | Tile and faction image loader and TTS map string parser, served at /tiles.js |
 
 ## LED Map
 
@@ -306,7 +325,9 @@ GND     ─────────────── GND
 
 **LEDs don't light:** Check GPIO 13 data wire, confirm PSU is powered, verify shared GND between PSU and ESP32-S3. On ESP32-S3, avoid GPIO 0, 45, 46 (strapping pins) for LED data — GPIO 13 is safe.
 
-**Web page won't load:** Confirm you are connected to the correct WiFi; check Serial Monitor for the IP address.
+**Web page won't load:** Confirm you are connected to the correct WiFi; check Serial Monitor for the IP address. Older Android phones and some guest networks can't open `.local` names: use the IP, or join the board's own WiFi and open `http://192.168.4.1`.
+
+**Moving to a new WiFi:** join the board's own WiFi (`TI4-HexRiser`), open `http://192.168.4.1/settings`, enter the new network, save, and reboot. Then open `http://ti4table.local` from the new network.
 
 **WebSocket not connecting:** Hard-refresh the browser (Ctrl+Shift+R). If the board rebooted, the WebSocket client reconnects automatically within a few seconds.
 

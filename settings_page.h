@@ -23,7 +23,7 @@ const char SETTINGS_PAGE[] PROGMEM = R"rawhtml(<!DOCTYPE html>
   h2{margin:24px 0 12px}
   .row{display:flex;align-items:center;margin-bottom:8px;gap:10px}
   label{width:200px;color:#a5c8e4;flex-shrink:0}
-  input[type=text],input[type=password],input[type=number]{padding:7px 9px;width:240px}
+  input[type=text],input[type=password],input[type=number],select{padding:7px 9px;width:240px}
   input[type=checkbox]{width:18px;height:18px;cursor:pointer}
   .note{font-size:.75em;color:#6b8aa6;margin-left:4px}
   .btn{padding:10px 22px;font-size:.8em;margin-right:8px}
@@ -40,6 +40,9 @@ const char SETTINGS_PAGE[] PROGMEM = R"rawhtml(<!DOCTYPE html>
 <div class="row"><label>Network Password</label><input type="password" id="homePass"></div>
 <div class="row"><label>AP SSID</label><input type="text" id="apSSID"></div>
 <div class="row"><label>AP Password</label><input type="password" id="apPass"></div>
+<div class="row"><label>Hostname</label><input type="text" id="hostname" maxlength="31"><span class="note" id="hostname-address"></span></div>
+<div class="row"><label>Keep AP On</label><input type="checkbox" id="keepAccessPoint"><span class="note">board's own WiFi stays on after joining a network</span></div>
+<div class="row" id="network-address-row" hidden><label>Network Address</label><span id="network-address"></span></div>
 <div class="row"><label>Network Timeout (ms)</label><input type="number" id="homeTimeoutMs" min="1000" max="30000" step="1000"></div>
 
 <h2 class="panel-label">LED</h2>
@@ -48,6 +51,7 @@ const char SETTINGS_PAGE[] PROGMEM = R"rawhtml(<!DOCTYPE html>
 <div class="row"><label>LED Update Rate (ms)</label><input type="number" id="ledUpdateMs" min="1" max="100"></div>
 <div class="row"><label>Broadcast Rate (ms)</label><input type="number" id="broadcastMs" min="50" max="1000"></div>
 <div class="row"><label>Side Gap</label><input type="number" id="sideGap" min="0" max="20"><span class="note">px inset on LED side lines (0 = touching, higher = more gap)</span></div>
+<div class="row"><label>Side Width</label><select id="thinSides"><option value="0">Normal</option><option value="1">Thin</option></select></div>
 <div class="row"><label>Simulate Hardware</label><input type="checkbox" id="simulateHardware"><span class="note">skip FastLED.show() calls</span></div>
 
 <h2 class="panel-label">Debug</h2>
@@ -87,6 +91,12 @@ function loadSettings() {
     document.getElementById('debugWeb').checked      = d.debugWeb        || false;
     document.getElementById('debugLed').checked      = d.debugLed        || false;
     document.getElementById('debugKeyboard').checked = d.debugKeyboard   || false;
+    document.getElementById('thinSides').value       = d.thinSides ? '1' : '0';
+    document.getElementById('hostname').value        = d.hostname || 'ti4table';
+    document.getElementById('hostname-address').textContent = 'http://' + (d.hostname || 'ti4table') + '.local';
+    document.getElementById('keepAccessPoint').checked = d.keepAccessPoint !== false;
+    document.getElementById('network-address').textContent = 'http://' + d.networkAddress;
+    document.getElementById('network-address-row').hidden = !d.networkAddress;
   }).catch(function(){setStatus('Could not load settings from board.', false);});
 }
 
@@ -111,6 +121,9 @@ function saveSettings() {
     encodeField('debugWeb',          document.getElementById('debugWeb').checked ? '1' : '0'),
     encodeField('debugLed',          document.getElementById('debugLed').checked ? '1' : '0'),
     encodeField('debugKeyboard',     document.getElementById('debugKeyboard').checked ? '1' : '0'),
+    encodeField('thinSides',         document.getElementById('thinSides').value),
+    encodeField('hostname',          document.getElementById('hostname').value),
+    encodeField('keepAccessPoint',   document.getElementById('keepAccessPoint').checked ? '1' : '0'),
   ].join('&');
   fetch('/savesettings?' + params)
     .then(function(){setStatus('Saved. Reboot the board for WiFi changes to take effect.', true);})
