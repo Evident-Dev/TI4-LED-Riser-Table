@@ -717,7 +717,8 @@ void initNetwork() {
       "\"debugSerial\":%s,"
       "\"debugWeb\":%s,"
       "\"debugLed\":%s,"
-      "\"debugKeyboard\":%s}",
+      "\"debugKeyboard\":%s,"
+      "\"thinSides\":%s}",
       rtCfg.homeSSID, rtCfg.homePass,
       rtCfg.apSSID,   rtCfg.apPass,
       (unsigned long)rtCfg.homeTimeoutMs,
@@ -727,7 +728,8 @@ void initNetwork() {
       rtCfg.debugSerial      ? "true" : "false",
       rtCfg.debugWeb         ? "true" : "false",
       rtCfg.debugLed         ? "true" : "false",
-      rtCfg.debugKeyboard    ? "true" : "false"
+      rtCfg.debugKeyboard    ? "true" : "false",
+      rtCfg.thinSides        ? "true" : "false"
     );
     request->send(200, "application/json", buf);
   });
@@ -921,6 +923,7 @@ void parseSaveSettings(const String& query) {
     else if (key == "debugWeb")          rtCfg.debugWeb          = (decoded[0] == '1');
     else if (key == "debugLed")          rtCfg.debugLed          = (decoded[0] == '1');
     else if (key == "debugKeyboard")     rtCfg.debugKeyboard     = (decoded[0] == '1');
+    else if (key == "thinSides")         rtCfg.thinSides         = (decoded[0] == '1');
 
     pos = ampPos + 1;
   }

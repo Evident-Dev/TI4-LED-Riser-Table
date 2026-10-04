@@ -34,6 +34,7 @@
 #define LED_COLOR_ORDER     GRB    // SK6812 RGB channel order
 #define LED_UPDATE_MS       8     // ~60 FPS
 #define SIDE_GAP            4      // Side line inset (px); higher = more gap between hex colors
+#define THIN_SIDES          false  // Thinner LED side lines in the browser
 
 // -----------------------------------------------------------------------------
 // WiFi / Network

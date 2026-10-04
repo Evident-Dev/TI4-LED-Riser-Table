@@ -147,6 +147,7 @@ Saved settings override the defaults in `config.h`. Settings go back to the `con
 | LED Update Rate | Animation tick interval in ms (30 ms minimum is enforced) |
 | Broadcast Rate | How often the board pushes state to the browser (ms) |
 | Side Gap | Inset of the colored side lines in the browser (0 = touching, higher = more gap) |
+| Side Width | Normal or Thin colored side lines in the browser |
 | Simulate Hardware | Skip FastLED.show() -- use this when testing without the strip connected |
 | Debug flags | Enable serial logging for various subsystems |
 

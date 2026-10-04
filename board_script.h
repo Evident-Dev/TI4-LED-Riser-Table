@@ -49,6 +49,7 @@ const char BOARD_SCRIPT[] = R"=====(
     '.hex-board.clickable g:hover .hex-outline { stroke: #7fe6ff; }' +
     '.hex-outline.selected { fill: #38d6ff26; stroke: #7fe6ff; stroke-width: 2.5; }' +
     '.hex-side { stroke: transparent; stroke-width: 5; stroke-linecap: round; fill: none; pointer-events: none; }' +
+    '.hex-board.thin-sides .hex-side { stroke-width: 2.5; }' +
     '.hex-board text { font-family: system-ui, sans-serif; font-size: 12px; font-weight: 500;' +
     '  fill: #47556988; text-anchor: middle; dominant-baseline: central; pointer-events: none; }';
   document.head.appendChild(boardStyle);
@@ -427,7 +428,10 @@ const char BOARD_SCRIPT[] = R"=====(
 
     fetch('/getsettings', { cache: 'no-store' })
       .then(function (response) { return response.json(); })
-      .then(function (settings) { build(settings.sideGap != null ? +settings.sideGap : 4); })
+      .then(function (settings) {
+        svg.classList.toggle('thin-sides', !!settings.thinSides);
+        build(settings.sideGap != null ? +settings.sideGap : 4);
+      })
       .catch(function () { build(4); });
 
     return {

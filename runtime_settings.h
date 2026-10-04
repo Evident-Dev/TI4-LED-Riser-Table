@@ -35,6 +35,9 @@ struct RuntimeConfig {
   bool     debugWeb;
   bool     debugLed;
   bool     debugKeyboard;
+
+  // Added later: new fields go at the end so older saves still load
+  bool     thinSides;           // thinner LED side lines in the browser
 };
 
 // One global instance — initialized from config.h defaults at boot.
@@ -55,7 +58,8 @@ RuntimeConfig rtCfg = {
   DEBUG_SERIAL,
   DEBUG_WEB_TEST,
   DEBUG_LED_TEST,
-  DEBUG_KEYBOARD_TEST
+  DEBUG_KEYBOARD_TEST,
+  THIN_SIDES
 };
 
 // Bump when RuntimeConfig changes so old saved bytes are ignored
@@ -66,9 +70,11 @@ static Preferences settingsStorage;
 // Loads saved settings over the config.h defaults. Call first in setup().
 void loadRuntimeSettings() {
   if (!settingsStorage.begin("ti4settings", true)) return;  // nothing saved yet
+  // A shorter save is from before fields were added; those keep their defaults
+  size_t savedLength = settingsStorage.getBytesLength("config");
   if (settingsStorage.getUChar("version", 0) == SETTINGS_FORMAT_VERSION &&
-      settingsStorage.getBytesLength("config") == sizeof(RuntimeConfig)) {
-    settingsStorage.getBytes("config", &rtCfg, sizeof(RuntimeConfig));
+      savedLength > 0 && savedLength <= sizeof(RuntimeConfig)) {
+    settingsStorage.getBytes("config", &rtCfg, savedLength);
   }
   settingsStorage.end();
 }
