@@ -4,7 +4,8 @@
 // TI4 Hex Riser - Projector Page (/projector)
 // =============================================================================
 // Full-screen live mirror of the table for a projector or TV. Display only.
-// Shows the map tiles, a player list, and faction icons on claimed hexes.
+// Shows the map tiles, a player list, and faction icons on claimed hexes,
+// over the same twinkling starfield as the home page.
 // =============================================================================
 
 const char PROJECTOR_PAGE[] = R"=====(
@@ -16,8 +17,10 @@ const char PROJECTOR_PAGE[] = R"=====(
 <title>TI4 Projector</title>
 <style>
 * { box-sizing: border-box; margin: 0; padding: 0; }
-html, body { height: 100%; background: #05070d; overflow: hidden; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+html { background: #03050c; }
+html, body { height: 100%; overflow: hidden; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
 body { display: flex; }
+#starfield { position: fixed; inset: 0; width: 100%; height: 100%; z-index: -1; }
 #roster {
   flex-shrink: 0; display: flex; flex-direction: column; gap: 1vmin; padding: 2.5vmin 0 2.5vmin 2.5vmin;
   font-size: 2vmin; color: #cbd5e1;
@@ -37,6 +40,7 @@ body { display: flex; }
 <script src="/board.js"></script>
 </head>
 <body>
+<canvas id="starfield"></canvas>
 <div id="roster"></div>
 <svg id="board"></svg>
 <script>
@@ -55,6 +59,47 @@ connectTable({
     renderRoster();
   }
 });
+
+// Twinkling starfield, matching the home page background
+(function () {
+  var canvas  = document.getElementById('starfield');
+  var context = canvas.getContext('2d');
+  var reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var STAR_COUNT = 300;
+  var width = 0, height = 0;
+  var stars = [];
+
+  function random(minimum, maximum) { return minimum + Math.random() * (maximum - minimum); }
+
+  for (var star = 0; star < STAR_COUNT; star++) {
+    stars.push({ x: Math.random(), y: Math.random(), size: random(0.5, 1.6),
+                 twinkleSpeed: random(0.0006, 0.002), phase: random(0, Math.PI * 2) });
+  }
+
+  function resize() {
+    var scale = Math.min(window.devicePixelRatio || 1, 1.5);
+    width  = window.innerWidth;
+    height = window.innerHeight;
+    canvas.width  = width * scale;
+    canvas.height = height * scale;
+    context.setTransform(scale, 0, 0, scale, 0, 0);
+  }
+
+  function drawFrame(time) {
+    context.fillStyle = '#03050c';
+    context.fillRect(0, 0, width, height);
+    stars.forEach(function (star) {
+      var twinkle = reducedMotion ? 0.7 : 0.4 + 0.6 * Math.abs(Math.sin(time * star.twinkleSpeed + star.phase));
+      context.fillStyle = 'rgba(220,235,255,' + (twinkle * 0.85) + ')';
+      context.fillRect(star.x * width, star.y * height, star.size, star.size);
+    });
+    if (!reducedMotion) requestAnimationFrame(drawFrame);
+  }
+
+  resize();
+  window.addEventListener('resize', function () { resize(); if (reducedMotion) drawFrame(0); });
+  requestAnimationFrame(drawFrame);
+})();
 
 function renderRoster() {
   var roster = document.getElementById('roster');
