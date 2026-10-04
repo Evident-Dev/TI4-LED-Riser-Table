@@ -7,7 +7,7 @@
 
 // =============================================================================
 // TI4 Hex Riser - LED Control
-// Target: ESP32-DOWP-V3
+// Target: ESP32-S3-WROOM-1-N16R8
 // =============================================================================
 // FastLED setup, per-hex color management, and all animation effects.
 // Call initLEDs() once in setup(), then create the LED task on Core 0.
@@ -30,9 +30,9 @@ enum AnimEffect {
   ANIM_NONE    = 0,
   ANIM_RAINBOW = 1,
   ANIM_PULSE   = 2,
-  ANIM_SPIRAL  = 3,
-  ANIM_SPARKLE = 4,
-  ANIM_WAVE    = 5,
+  ANIM_SPARKLE = 3,
+  ANIM_WAVE    = 4,
+  ANIM_RIPPLE  = 5,
 };
 
 static AnimEffect currentEffect      = ANIM_NONE;
@@ -68,7 +68,7 @@ void initLEDs() {
   }
 
   if (rtCfg.debugSerial) {
-    Serial.println(F("LEDs: FastLED init OK — 915 LEDs on GPIO 13 (RMT)"));
+    Serial.println(F("LEDs: FastLED init OK — 915 LEDs on GPIO 13 (I2S)"));
     Serial.print(F("LEDs: Brightness "));
     Serial.println(rtCfg.defaultBrightness);
   }
@@ -131,18 +131,18 @@ void pushLEDs() {
 void startEffect(AnimEffect effect) {
   if (currentEffect == ANIM_NONE) {
     // Save board state so stopEffect() can restore it
-    memcpy(hexColorSnapshot, hexColor, sizeof(hexColor));
+    memcpy((void*)hexColorSnapshot, (const void*)hexColor, sizeof(hexColor));
     effectSnapshotValid = true;
   }
-  currentEffect = effect;
-  animStartMs   = millis();
+  currentEffect  = effect;
+  animStartMs    = millis();
 }
 
 void stopEffect() {
   currentEffect = ANIM_NONE;
   FastLED.setBrightness(rtCfg.defaultBrightness);
   if (effectSnapshotValid) {
-    memcpy(hexColor, hexColorSnapshot, sizeof(hexColor));
+    memcpy((void*)hexColor, (const void*)hexColorSnapshot, sizeof(hexColor));
     applyHexColors();
     effectSnapshotValid = false;
   } else {
@@ -171,38 +171,6 @@ static void tickPulse(uint32_t elapsed) {
   fill_solid(leds, NUM_LEDS, CHSV(hue, 200, val));
 }
 
-static const uint8_t SPIRAL_RINGS[5][24] = {
-  {30,
-   255,255,255,255,255,255,255,255,255,255,255,
-   255,255,255,255,255,255,255,255,255,255,255,255},
-  {29,31,21,22,38,39,
-   255,255,255,255,255,255,255,255,255,255,255,
-   255,255,255,255,255,255,255},
-  {28,23,40,32,20,37,14,15,13,46,47,45,
-   255,255,255,255,255,255,255,255,255,255,255,255},
-  {27,24,41,12,44,33,19,36,16,48,8,7,6,9,53,52,51,54,
-   255,255,255,255,255,255},
-  {0,1,2,3,4,5,10,11,17,18,25,26,34,35,42,43,49,50,55,56,57,58,59,60},
-};
-
-static void tickSpiral(uint32_t elapsed) {
-  uint32_t ringMs = 350;
-  int activeRing  = (int)(elapsed / ringMs);
-  if (activeRing > 4) activeRing = 4;
-
-  uint8_t hue = (elapsed / 10) & 0xFF;
-  FastLED.clear();
-
-  for (int ringIdx = 0; ringIdx <= activeRing && ringIdx < 5; ringIdx++) {
-    CRGB color = CHSV(hue + ringIdx * 40, 255, 200);
-    for (int entryIdx = 0; entryIdx < 24; entryIdx++) {
-      uint8_t hexIdx = SPIRAL_RINGS[ringIdx][entryIdx];
-      if (hexIdx == 255) break;
-      setHexColor(hexIdx, color);
-    }
-  }
-}
-
 static void tickSparkle(uint32_t elapsed) {
   fadeToBlackBy(leds, NUM_LEDS, 10);
   if (random8() < 40) {
@@ -228,15 +196,45 @@ static void tickWave(uint32_t elapsed) {
   }
 }
 
+static const uint8_t RIPPLE_RINGS[5][24] = {
+  {30,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255},
+  {29,31,21,22,38,39,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255},
+  {28,23,40,32,20,37,14,15,13,46,47,45,255,255,255,255,255,255,255,255,255,255,255,255},
+  {27,24,41,12,44,33,19,36,16,48,8,7,6,9,53,52,51,54,255,255,255,255,255,255},
+  {0,1,2,3,4,5,10,11,17,18,25,26,34,35,42,43,49,50,55,56,57,58,59,60},
+};
+
+static void tickRipple(uint32_t elapsed) {
+  uint32_t ringMs    = 350;
+  int      activeRing = (int)(elapsed / ringMs);
+  if (activeRing > 4) activeRing = 4;
+
+  uint8_t hue = (elapsed / 10) & 0xFF;
+
+  bool inRing[NUM_HEXES] = {};
+  for (int r = 0; r <= activeRing; r++) {
+    CRGB color = CHSV(hue + r * 40, 255, 200);
+    for (int e = 0; e < 24; e++) {
+      uint8_t h = RIPPLE_RINGS[r][e];
+      if (h == 255) break;
+      setHexColor(h, color);
+      inRing[h] = true;
+    }
+  }
+  for (int i = 0; i < NUM_HEXES; i++) {
+    if (!inRing[i]) setHexColor(i, CRGB::Black);
+  }
+}
+
 static void tickEffect() {
   if (currentEffect == ANIM_NONE) return;
   uint32_t elapsed = millis() - animStartMs;
   switch (currentEffect) {
     case ANIM_RAINBOW: tickRainbow(elapsed); break;
     case ANIM_PULSE:   tickPulse(elapsed);   break;
-    case ANIM_SPIRAL:  tickSpiral(elapsed);  break;
     case ANIM_SPARKLE: tickSparkle(elapsed); break;
     case ANIM_WAVE:    tickWave(elapsed);    break;
+    case ANIM_RIPPLE:  tickRipple(elapsed);  break;
     default: break;
   }
 }
@@ -263,7 +261,8 @@ void runLEDTest() {
 // -----------------------------------------------------------------------------
 void updateLEDs() {
   uint32_t now = millis();
-  if (now - lastLEDUpdate < rtCfg.ledUpdateMs) return;
+  uint32_t frameMs = max((uint32_t)rtCfg.ledUpdateMs, (uint32_t)LED_MIN_FRAME_MS);
+  if (now - lastLEDUpdate < frameMs) return;
   lastLEDUpdate = now;
 
   if (currentEffect != ANIM_NONE) {
@@ -271,6 +270,26 @@ void updateLEDs() {
   }
 
   pushLEDs();
+}
+
+// -----------------------------------------------------------------------------
+// Player edge lighting
+// -----------------------------------------------------------------------------
+void setPlayerEdgeColor(uint8_t playerCount, uint8_t playerIndex, CRGB color) {
+  if (playerCount < 4 || playerCount > 8) return;
+  if (playerIndex >= playerCount) return;
+  const EdgeSide* sides = PLAYER_EDGE_SIDES[playerCount - 4][playerIndex];
+  for (int i = 0; i < MAX_EDGE_SIDES; i++) {
+    if (sides[i].hex == EDGE_SIDE_END) break;
+    setHexSideColor(sides[i].hex, sides[i].dir, color);
+  }
+}
+
+void clearAllPlayerEdgeSides(uint8_t playerCount) {
+  if (playerCount < 4 || playerCount > 8) return;
+  for (uint8_t p = 0; p < playerCount; p++) {
+    setPlayerEdgeColor(playerCount, p, CRGB::Black);
+  }
 }
 
 // -----------------------------------------------------------------------------

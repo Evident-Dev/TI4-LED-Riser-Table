@@ -1,36 +1,39 @@
 // =============================================================================
 // TI4 Hex Riser - Main Firmware
-// Target: ESP32-DOWP-V3
+// Target: ESP32-S3-WROOM-1-N16R8
 //
 // Required libraries (Arduino IDE -> Library Manager):
-//   1. FastLED              (by Daniel Garcia)
-//   2. Adafruit MCP23X17    (by Adafruit)
-//   3. ESPAsyncWebServer    (GitHub: me-no-dev/ESPAsyncWebServer)
-//   4. AsyncTCP             (GitHub: me-no-dev/AsyncTCP)
+//   1. FastLED 3.10.3       (by Daniel Garcia) - 3.10.5 jams the LED driver
+//   2. ESP Async WebServer  (by ESP32Async)
+//   3. Async TCP            (by ESP32Async)
 //
-// Board: ESP32 Dev Module
-// CPU: 240 MHz, Flash: 4MB, Partition: Default 4MB with spiffs
+// Board: ESP32S3 Dev Module
+// CPU: 240 MHz (WiFi), Flash: 16MB QIO 80MHz, Partition: 16M Flash (3MB APP/9.9MB FATFS)
+// PSRAM: OPI PSRAM, USB CDC On Boot: Enabled, USB Mode: Hardware CDC and JTAG
 //
 // Core assignment:
-//   Core 0 — LED task (FastLED.show via RMT, ~60 fps)
-//   Core 1 — loop(): game state, keyboard, serial commands
-//             AsyncWebServer handles HTTP in background on Core 0
+//   Core 0 — LED task (FastLED.show, ~33 fps) — isolated from WiFi jitter
+//   Core 1 — loop(): game state, web commands, serial commands; state broadcast task
 // =============================================================================
+
+#define BOARD_HAS_PSRAM
+#define CONFIG_SPIRAM_CACHE_WORKAROUND
 
 #include "config.h"
 #include "runtime_settings.h"
 
 #include "led_map.h"
+#include "edge_map.h"
 #include "hex_neighbors.h"
 #include "led_control.h"
 #include "keyboard_control.h"
 #include "animations.h"
 #include "game_state.h"
-#include "web_interface.h"
 #include "web_server.h"  // renamed from network.h — avoids collision with ESP32 core Network.h
+#include "save_state.h"
 
 // =============================================================================
-// LED Task — runs on Core 0, ~60 fps
+// LED Task — runs on Core 0, drives the strip only.
 // initLEDs() is called in setup() before this task is created.
 // =============================================================================
 void ledTask(void *parameter) {
@@ -41,29 +44,37 @@ void ledTask(void *parameter) {
 }
 
 // =============================================================================
+// Broadcast Task — runs on Core 1 above loop(), pushes state to the web pages.
+// Kept off the LED task because WebSocket sends can block on a slow client.
+// Still runs while loop() is stuck in a blocking animation (speaker roulette).
+// =============================================================================
+void broadcastTask(void *parameter) {
+  for (;;) {
+    wsBroadcastTick();
+    vTaskDelay(pdMS_TO_TICKS(5));
+  }
+}
+
+// =============================================================================
+// Holds boot until open pages have reconnected and loaded: at least
+// BOOT_SETTLE_MIN_MS, then BOOT_SETTLE_QUIET_MS with no new page loads or
+// socket connects, giving up after BOOT_SETTLE_MAX_MS.
+// =============================================================================
+static void waitForNetworkToSettle() {
+  uint32_t start = millis();
+  while (millis() - start < BOOT_SETTLE_MAX_MS) {
+    bool minimumPassed = (millis() - start >= BOOT_SETTLE_MIN_MS);
+    bool quiet         = (millis() - lastNetworkActivityMs >= BOOT_SETTLE_QUIET_MS);
+    if (minimumPassed && quiet) break;
+    delay(50);
+  }
+}
+
+// =============================================================================
 // Keyboard press callback
 // =============================================================================
 void onKeyPressed(uint8_t playerIndex, uint8_t key) {
   handleGameKey(playerIndex, key);
-}
-
-// =============================================================================
-// Hex selection callback (web UI click)
-// Called from AsyncWebServer handler — no blocking delay or pushLEDs().
-// LED task picks up the color change within one frame (~16ms).
-// =============================================================================
-void onHexSelected(int hexIdx) {
-  if (hexIdx < 0 || hexIdx >= NUM_HEXES) return;
-  if (rtCfg.debugSerial) {
-    Serial.print(F("Web: hex selected "));
-    Serial.println(hexIdx);
-  }
-
-  // Brief white flash — LED task renders it; no explicit pushLEDs() needed.
-  CRGB prev = hexColor[hexIdx];
-  setHexColor(hexIdx, CRGB::White);
-  delay(80);
-  setHexColor(hexIdx, prev);
 }
 
 // =============================================================================
@@ -106,6 +117,7 @@ void handleSerialCommand() {
   } else if (line.startsWith("setplayers ")) {
     int count = line.substring(11).toInt();
     if (count < 4 || count > 8) { Serial.println(F("Player count must be 4-8")); return; }
+    clearSavedGame();
     for (uint8_t i = 0; i < MAX_PLAYERS; i++) players[i].active = (i < (uint8_t)count);
     Serial.print(F("Set ")); Serial.print(count); Serial.println(F(" active players"));
     transitionToSetup();
@@ -158,11 +170,11 @@ void handleSerialCommand() {
     effectName.toUpperCase();
     if      (effectName == "RAINBOW") startEffect(ANIM_RAINBOW);
     else if (effectName == "PULSE")   startEffect(ANIM_PULSE);
-    else if (effectName == "SPIRAL")  startEffect(ANIM_SPIRAL);
+    else if (effectName == "RIPPLE")  startEffect(ANIM_RIPPLE);
     else if (effectName == "SPARKLE") startEffect(ANIM_SPARKLE);
     else if (effectName == "WAVE")    startEffect(ANIM_WAVE);
     else if (effectName == "NONE")    stopEffect();
-    else Serial.println(F("Unknown effect. Try: rainbow pulse spiral sparkle wave none"));
+    else Serial.println(F("Unknown effect. Try: rainbow pulse ripple sparkle wave none"));
 
   // --- bright N ---
   } else if (line.startsWith("bright ")) {
@@ -185,7 +197,7 @@ void handleSerialCommand() {
     Serial.print(F("Phase: ")); Serial.println(phaseNames[(int)gameState.currentPhase]);
     Serial.print(F("Active players: ")); Serial.println(gameState.numActivePlayers);
     Serial.print(F("Speaker: P")); Serial.println(gameState.speakerIndex + 1);
-    Serial.print(F("WiFi IP: ")); Serial.println(WiFi.localIP());
+    printNetworkInfo();
     for (uint8_t i = 0; i < MAX_PLAYERS; i++) {
       if (players[i].active) {
         Serial.print(F("  P")); Serial.print(i + 1);
@@ -215,14 +227,18 @@ void handleSerialCommand() {
 // setup() — runs on Core 1
 // =============================================================================
 void setup() {
+  loadRuntimeSettings();
   Serial.begin(115200);
   Serial.setTimeout(500);
+#if ARDUINO_USB_CDC_ON_BOOT
+  Serial.setTxTimeoutMs(0);  // drop output when no monitor is reading instead of stalling the game
+#endif
   delay(500);  // let serial settle (ESP32 USB CDC initialises faster than Giga)
 
   if (rtCfg.debugSerial) {
     Serial.println();
     Serial.println(F("=============================="));
-    Serial.println(F(" TI4 Hex Riser v2.0 - ESP32"));
+    Serial.println(F(" TI4 Hex Riser v2.0 - ESP32-S3"));
     Serial.println(F("=============================="));
   }
 
@@ -234,10 +250,7 @@ void setup() {
 
   // Game state — default 6 players; override with 'setplayers N'
   initGameState(6);
-
-  // Boot animation runs on Core 1 before LED task is created
-  runBootAnimation();
-  transitionToSetup();
+  initSaveState();  // a saved game waits for resume once boot finishes
 
   // Spawn LED task on Core 0 — takes over FastLED.show() from here on
   xTaskCreatePinnedToCore(
@@ -249,6 +262,15 @@ void setup() {
     NULL,         // task handle
     0             // core 0
   );
+
+  xTaskCreatePinnedToCore(broadcastTask, "Broadcast_Task", 8192, NULL, 2, NULL, 1);
+
+  // Pages reconnecting after a reboot flood the network; let that pass
+  // before the boot animation so it runs smoothly.
+  waitForNetworkToSettle();
+  runBootAnimation();
+  transitionToSetup();
+  bootComplete = true;
 
   if (rtCfg.debugSerial) {
     Serial.println(F("Ready. LED task on Core 0. Type 'status' for game state."));
@@ -262,8 +284,9 @@ void setup() {
 void loop() {
   handleSerialCommand();
   handleKeyboard();
-  handleNetwork();   // no-op; kept for animDelay() compatibility
+  drainWebCommands();  // key presses and admin commands from the web pages
   updateGameState();
+  updateSaveState();
 
   // Heartbeat
   static uint32_t lastHeartbeat = 0;
