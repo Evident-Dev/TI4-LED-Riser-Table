@@ -22,7 +22,7 @@
 // anyone else can still take the seat.
 // =============================================================================
 
-#define SAVE_FORMAT_VERSION  1        // bump when SavedGame layout changes
+#define SAVE_FORMAT_VERSION  2        // bump when SavedGame layout changes
 #define SAVE_CHECK_MS        250
 
 struct SavedGame {

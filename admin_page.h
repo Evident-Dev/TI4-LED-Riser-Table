@@ -3,8 +3,9 @@
 // =============================================================================
 // TI4 Hex Riser - Admin Page (/admin)
 // =============================================================================
-// Game master controls for desktop and mobile: live board with hex claiming,
-// player count, seat roster, phase flow, rules, battle and lighting.
+// Game master controls for desktop and mobile: live board with map building
+// and hex claiming, player count, seat roster, phase flow, rules, battle and
+// lighting.
 // Desktop shows the board beside the controls; mobile stacks them.
 // =============================================================================
 
@@ -63,6 +64,11 @@ body {
 .swatch.selected { --edge: #ffffff; --edge-dim: #ffffffaa; --edge-width: 2px; }
 .swatch-dot { width: 13px; height: 13px; border-radius: 50%; flex-shrink: 0; }
 .tool-buttons { display: grid; grid-template-columns: repeat(2, minmax(110px, 1fr)); gap: 8px; }
+#map-tools { display: flex; flex-direction: column; gap: 10px; }
+#map-tools input[type=text] { flex: 1; min-width: 0; min-height: 40px; padding: 8px 10px; font-size: 0.85rem; }
+#map-tools .tool-row { flex-wrap: nowrap; }
+#map-error { font-size: 0.75rem; color: #f87171; }
+.seat-icon { width: 22px; height: 22px; object-fit: contain; flex-shrink: 0; }
 
 /* Controls */
 button { min-height: 40px; font-size: 0.75rem; padding: 9px 12px; }
@@ -110,6 +116,7 @@ select { min-height: 40px; font-size: 0.85rem; padding: 8px; }
 #turn-info-mobile { display: none; padding: 8px 12px 0; font-size: 0.82rem; color: var(--muted); }
 #turn-info-mobile b { color: var(--text); }
 </style>
+<script src="/tiles.js"></script>
 <script src="/board.js"></script>
 </head>
 <body>
@@ -133,6 +140,25 @@ select { min-height: 40px; font-size: 0.85rem; padding: 8px; }
 
   <div class="panel section" id="board-panel">
     <svg id="board"></svg>
+    <div id="map-tools" hidden>
+      <div class="panel-label">Map</div>
+      <div class="tool-row">
+        <div id="map-selected-hex">No hex selected</div>
+        <input type="text" id="tile-input" placeholder="Tile number" maxlength="7" autocomplete="off">
+        <button onclick="setSelectedTile()">Set Tile</button>
+        <button onclick="clearSelectedTile()">Clear</button>
+      </div>
+      <div class="tool-row" id="rotate-row" hidden>
+        <button onclick="rotateSelectedTile(-1)">&#8634; Rotate Left</button>
+        <button onclick="rotateSelectedTile(1)">Rotate Right &#8635;</button>
+      </div>
+      <div class="tool-row">
+        <input type="text" id="map-string-input" placeholder="TTS map string" autocomplete="off">
+        <button onclick="loadMapString()">Load Map</button>
+        <button class="danger" onclick="clearWholeMap()">Clear Map</button>
+      </div>
+      <div id="map-error" hidden></div>
+    </div>
     <div id="claim-tools" hidden>
       <div class="tool-row" id="player-swatches"></div>
       <div class="tool-row" style="margin-top:12px">
@@ -225,6 +251,8 @@ select { min-height: 40px; font-size: 0.85rem; padding: 8px; }
 var PHASE_NAMES = ['Setup','Strategy','Action','Status','Agenda'];
 var EFFECT_NAMES = ['RAINBOW','PULSE','RIPPLE','SPARKLE','WAVE'];
 var game = null;
+var map = null;
+var tableData = null;
 var selectedHex = -1;
 var selectedPlayer = -1;
 
@@ -236,10 +264,17 @@ function rebootController() {
 }
 
 var board = createHexBoard(document.getElementById('board'), { onHexClick: selectHex });
+loadTableData().then(function (data) { tableData = data; if (game) render(); });
 var table = connectTable({
   onFrame: board.renderLedFrame,
+  onMap: function (newMap) {
+    map = newMap;
+    board.setMap(map);
+    renderMapTools();
+  },
   onGame: function (newGame) {
     game = newGame;
+    board.setGame(game);
     showRecoveryPrompt(game, {
       onResume: function () { table.send('RESUME'); },
       onNewGame: function () {
@@ -259,6 +294,11 @@ function selectHex(hexIndex) {
   selectedHex = hexIndex;
   board.setSelectedHex(hexIndex);
   document.getElementById('selected-hex').innerHTML = 'Hex <b>' + hexIndex + '</b>';
+  document.getElementById('map-selected-hex').innerHTML = 'Hex <b>' + hexIndex + '</b>';
+  var placed = board.tileAt(hexIndex);
+  document.getElementById('tile-input').value = placed ? placed.tileNumber : '';
+  showMapError('');
+  renderMapTools();
 }
 function selectPlayer(playerIndex) {
   selectedPlayer = playerIndex;
@@ -273,6 +313,85 @@ function claimHex() {
 function clearHex() {
   if (selectedHex < 0) return;
   table.send('CLAIMHEX:' + selectedHex + ':255');
+}
+
+// ============================================================
+// Map
+// ============================================================
+function showMapError(message) {
+  var error = document.getElementById('map-error');
+  error.textContent = message;
+  error.hidden = !message;
+}
+function sendTile(hexIndex, tileNumber, rotation) {
+  table.send('ADMIN:TILE:' + hexIndex + ':' + (rotation || 0) + ':' + tileNumber);
+}
+// Index lookups only work with the CDN; offline any tile number is accepted
+function knownTileNumber(tileNumber) {
+  if (!tableData) return tileNumber;
+  var tile = tileInfo(tableData, tileNumber);
+  if (!tile) return null;
+  return tile.image.replace(/^.*ST_|\.png$/g, '');
+}
+function setSelectedTile() {
+  if (selectedHex < 0) return;
+  var typed = document.getElementById('tile-input').value.trim();
+  if (!typed) { clearSelectedTile(); return; }
+  var tileNumber = knownTileNumber(typed);
+  if (!tileNumber) { showMapError('Tile ' + typed + ' not found'); return; }
+  showMapError('');
+  sendTile(selectedHex, tileNumber, 0);
+}
+function clearSelectedTile() {
+  if (selectedHex < 0) return;
+  document.getElementById('tile-input').value = '';
+  sendTile(selectedHex, '', 0);
+}
+function rotateSelectedTile(direction) {
+  if (selectedHex < 0 || !map || !map.tiles[selectedHex]) return;
+  var rotation = (+map.rot.charAt(selectedHex) + direction + 6) % 6;
+  sendTile(selectedHex, map.tiles[selectedHex], rotation);
+}
+document.getElementById('tile-input').addEventListener('keydown', function (event) {
+  if (event.key === 'Enter') setSelectedTile();
+});
+
+function mapHasTiles() {
+  return !!map && map.tiles.some(function (tileNumber) { return !!tileNumber; });
+}
+function loadMapString() {
+  var parsed = parseTtsMapString(document.getElementById('map-string-input').value);
+  if (parsed.tiles.length === 0) { showMapError('Paste a TTS map string first'); return; }
+  var unknown = [];
+  function resolve(entry) {
+    if (!entry.tileNumber) return entry;
+    var tileNumber = knownTileNumber(entry.tileNumber);
+    if (!tileNumber) { unknown.push(entry.tileNumber); return { tileNumber: '', rotation: 0 }; }
+    return { tileNumber: tileNumber, rotation: entry.rotation };
+  }
+  var center = parsed.center ? resolve(parsed.center) : { tileNumber: '18', rotation: 0 };
+  var tiles = parsed.tiles.slice(0, board.ttsOrder.length - 1).map(resolve);
+
+  function apply() {
+    table.send('ADMIN:CLEARMAP');
+    sendTile(board.ttsOrder[0], center.tileNumber, center.rotation);
+    tiles.forEach(function (entry, position) {
+      if (entry.tileNumber) sendTile(board.ttsOrder[position + 1], entry.tileNumber, entry.rotation);
+    });
+    showMapError(unknown.length ? 'Skipped unknown tiles: ' + unknown.join(', ') : '');
+    document.getElementById('map-string-input').value = '';
+  }
+  if (mapHasTiles()) confirmDo('Replace the current map?', apply, { confirmLabel: 'Replace Map' });
+  else apply();
+}
+function clearWholeMap() {
+  confirmDo('Clear every tile from the map?', function () { table.send('ADMIN:CLEARMAP'); },
+            { confirmLabel: 'Clear Map', danger: true });
+}
+
+function renderMapTools() {
+  var tile = (selectedHex >= 0 && map) ? tileInfo(tableData, map.tiles[selectedHex]) : null;
+  document.getElementById('rotate-row').hidden = !(tile && tile.type === 'hyperlane');
 }
 
 // ============================================================
@@ -394,6 +513,14 @@ function renderSeats() {
     dot.style.background = player.a ? ('#' + player.col) : '#222';
     row.appendChild(dot);
 
+    var iconUrl = player.a ? factionIconUrl(tableData, player.fa) : null;
+    if (iconUrl) {
+      var icon = element('img', 'seat-icon');
+      icon.src = iconUrl;
+      icon.alt = '';
+      row.appendChild(icon);
+    }
+
     var name = element('div', 'seat-name');
     if (!player.a) {
       name.innerHTML = '<span style="color:#334155">Seat ' + (seat + 1) + '</span> <span class="sub">not in game</span>';
@@ -403,6 +530,8 @@ function renderSeats() {
       else nameText.innerHTML = '<span style="color:#475569">Seat ' + (seat + 1) + ' open</span>';
       name.appendChild(nameText);
       var seatStatus = player.st ? ' &middot; phone connected' : player.rs ? ' &middot; reserved, waiting for phone' : ' &middot; /play to join';
+      var faction = player.fa && tableData ? tableData.factions[player.fa] : null;
+      if (faction) seatStatus = ' &middot; ' + faction.name + seatStatus;
       name.appendChild(element('div', 'sub', 'Seat ' + (seat + 1) + seatStatus));
     }
     row.appendChild(name);
@@ -481,6 +610,8 @@ function render() {
   document.getElementById('game-controls').hidden    = inSetup;
   document.getElementById('section-battle').hidden   = !inAction;
   document.getElementById('claim-tools').hidden      = !inAction;
+  document.getElementById('map-tools').hidden        = !inSetup;
+  renderMapTools();
 
   renderTurnInfo();
   renderSwatches();

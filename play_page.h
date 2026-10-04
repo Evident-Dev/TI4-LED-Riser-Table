@@ -117,7 +117,27 @@ input[type=text] { width: 100%; padding: 12px; font-size: 1rem; }
 #recovery-prompt .title { color: #fbbf24; font-size: 1.1rem; letter-spacing: 0.2em; text-transform: uppercase; margin-bottom: 10px; }
 #recovery-prompt .detail { color: #cbd5e1; font-size: 0.95rem; margin-bottom: 20px; }
 #recovery-prompt button { min-height: 48px; padding: 10px 28px; font-size: 0.95rem; }
+.faction-choice { display: flex; align-items: center; justify-content: center; gap: 10px; padding: 12px; font-size: 0.85rem; }
+.faction-choice img { width: 28px; height: 28px; object-fit: contain; }
+#faction-picker {
+  position: fixed; inset: 0; z-index: 900; display: none; flex-direction: column;
+  background: #04070ff2;
+}
+#faction-picker.visible { display: flex; }
+#faction-picker .picker-top { display: flex; align-items: center; gap: 10px; padding: 12px 14px; }
+#faction-picker .picker-top h2 { flex: 1; }
+#faction-picker .picker-top button { --cut: 6px; font-size: 0.7rem; padding: 8px 12px; }
+#faction-list { flex: 1; overflow-y: auto; padding: 4px 14px 24px; display: flex; flex-direction: column; gap: 14px; }
+.faction-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 8px; }
+.faction-option {
+  display: flex; align-items: center; gap: 8px; padding: 8px 10px; min-height: 48px;
+  font-size: 0.72rem; text-align: left; text-transform: none; letter-spacing: 0.02em;
+}
+.faction-option img { width: 30px; height: 30px; object-fit: contain; flex-shrink: 0; }
+.faction-option.sel { --edge: #ffffff; --edge-dim: #ffffffcc; --edge-width: 2px; }
+.faction-option.gone { opacity: 0.25; }
 </style>
+<script src="/tiles.js"></script>
 </head>
 <body>
 
@@ -145,6 +165,14 @@ input[type=text] { width: 100%; padding: 12px; font-size: 1rem; }
 
 <div id="content"></div>
 <div class="panel toast" id="toast"></div>
+<div id="faction-picker">
+  <div class="picker-top holo-bar">
+    <h2>Choose your faction</h2>
+    <button onclick="chooseFaction(null)">None</button>
+    <button onclick="closeFactionPicker()">Close</button>
+  </div>
+  <div id="faction-list"></div>
+</div>
 
 <script>
 // Mirrors COLOR_PALETTE / STRATEGY_COLORS in config.h
@@ -173,6 +201,8 @@ var game    = null;           // last game JSON
 var battleArming = false;     // local: tapped Battle, choosing opponent
 var _lastGameStr = '';        // raw JSON of the last render, to skip no-change pushes
 var _renderPending = false;   // a render was skipped while the name field had focus
+var tableData = null;         // tile and faction indexes from the CDN, null when offline
+loadTableData().then(function (data) { tableData = data; if (game) render(); });
 
 // ============================================================
 // WebSocket
@@ -281,6 +311,8 @@ function connect() {
       localStorage.setItem('ti4Token', myToken);
       localStorage.setItem('ti4Game', myGame);
       render();
+    } else if (ev.data === 'FACTIONTAKEN') {
+      toast('Faction already taken');
     } else if (ev.data.indexOf('DENIED:') === 0) {
       seated = false;
       myToken = '0';
@@ -377,6 +409,7 @@ function render() {
     leaveBtn.style.display = 'none';
   }
 
+  if (!me || game.phase !== 0) closeFactionPicker();
   if (!me) { renderSeatSelect(c); return; }
   if (!me.a) {
     c.appendChild(el('div', 'panel turn-banner', 'Your seat is not in this game.<br>' +
@@ -434,7 +467,73 @@ function renderSeatSelect(c) {
 }
 
 // ------------------------------------------------------------
+// Faction picker (setup only, needs the CDN)
+function openFactionPicker() {
+  renderFactionPicker();
+  document.getElementById('faction-picker').classList.add('visible');
+}
+function closeFactionPicker() {
+  document.getElementById('faction-picker').classList.remove('visible');
+}
+function chooseFaction(faction) {
+  if (!seated) return;
+  send('FACTION:' + mySeat + ':' + myToken + ':' + (faction ? faction.id + ':' + faction.homeSystem : ':'));
+  closeFactionPicker();
+}
+function factionTakenByOther(factionId) {
+  return game.players.some(function (player, playerIndex) {
+    return playerIndex !== mySeat && player.a && player.fa === factionId;
+  });
+}
+function renderFactionPicker() {
+  var list = document.getElementById('faction-list');
+  list.innerHTML = '';
+  if (!game || !tableData) return;
+  var me = game.players[mySeat];
+  factionsBySet(tableData).forEach(function (group) {
+    var section = el('div');
+    section.appendChild(el('div', 'panel-label', group.label));
+    var grid = el('div', 'faction-grid');
+    group.factions.forEach(function (faction) {
+      var option = el('button', 'faction-option');
+      var icon = el('img');
+      icon.src = factionIconUrl(tableData, faction.id);
+      icon.alt = '';
+      option.appendChild(icon);
+      option.appendChild(document.createTextNode(faction.name));
+      if (me && me.fa === faction.id) option.classList.add('sel');
+      if (factionTakenByOther(faction.id)) {
+        option.classList.add('gone');
+        option.disabled = true;
+      }
+      option.onclick = function () { chooseFaction(faction); };
+      grid.appendChild(option);
+    });
+    section.appendChild(grid);
+    list.appendChild(section);
+  });
+}
+
+function renderFactionChoice(c, me) {
+  if (!tableData) return;
+  var button = el('button', 'faction-choice');
+  var faction = me.fa ? tableData.factions[me.fa] : null;
+  if (faction) {
+    var icon = el('img');
+    icon.src = factionIconUrl(tableData, me.fa);
+    icon.alt = '';
+    button.appendChild(icon);
+    button.appendChild(document.createTextNode(faction.name));
+  } else {
+    button.textContent = 'Choose Faction';
+  }
+  button.onclick = openFactionPicker;
+  c.appendChild(button);
+}
+
 function renderSetup(c, me) {
+  renderFactionChoice(c, me);
+  if (document.getElementById('faction-picker').classList.contains('visible')) renderFactionPicker();
   c.appendChild(el('h2', null, me.cl ? 'Color locked in!' : 'Choose your color'));
 
   var grid = el('div', 'swatch-grid');

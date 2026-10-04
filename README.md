@@ -84,9 +84,9 @@ If no game state arrives for 1 second the pages show a **Table offline** splash 
 | Page | Who | What |
 |---|---|---|
 | `/` | Everyone | Home page with links to Admin, Player and Projector |
-| `/projector` | Projector / TV | Full-screen live board mirror, display only |
-| `/play` (or `/player`) | Players 1-8 | Phone keypad: claim a seat, then a phase-aware pad (color select, strategy cards, end turn / pass / battle, ready, agenda) |
-| `/admin` | Game master | Desktop and mobile. Live board with hex claiming, player count, force start, reset, phase jumps, custom rules, seat roster with kick, speaker token, battle, lighting |
+| `/projector` | Projector / TV | Full-screen live board mirror with map tiles, player list, and faction icons on claimed hexes. Display only |
+| `/play` (or `/player`) | Players 1-8 | Phone keypad: claim a seat, then a phase-aware pad (faction and color select, strategy cards, end turn / pass / battle, ready, agenda) |
+| `/admin` | Game master | Desktop and mobile. Live board with map building and hex claiming, player count, force start, reset, phase jumps, custom rules, seat roster with kick, speaker token, battle, lighting |
 | `/settings` | — | WiFi, LED, debug, and display settings at runtime |
 
 ### Playing from phones
@@ -94,7 +94,21 @@ If no game state arrives for 1 second the pages show a **Table offline** splash 
 1. Game master opens `/admin` and sets the player count (this restarts setup and assigns home hexes)
 2. Each player opens `/play` on their phone, enters a name, and grabs an open seat
 3. Seats survive phone screen locks and reconnects — the claim token is stored in the browser
-4. Every keypad press goes through `handleGameKey()`, the same path as the `kb` serial command
+4. During setup, players can pick a faction. Its icon shows next to their name on the admin page and projector, and its home system appears on their home hex
+5. Every keypad press goes through `handleGameKey()`, the same path as the `kb` serial command
+
+### Map tiles
+
+Tile art and faction icons load from the [TI4 image CDN](https://evident-dev.github.io/TI4-Images/index.json). The board stores only tile numbers and faction ids. With no internet (AP mode), pages show plain hexes.
+
+The map can only be changed during setup, from the admin page:
+
+- **One hex:** tap a hex, type the tile number, then **Set Tile**. Hyperlanes get rotate buttons while selected.
+- **Whole map:** paste a TTS map string (for example from Milty Draft) and press **Load Map**. Mecatol Rex is added when the string leaves it out, and empty home spots fill in from each player's faction.
+
+The map is saved to flash and stays until **Clear Map**. Hex numbers show during setup and hide once the game starts.
+
+Claiming hexes is optional. Claiming the center hex marks the custodians token taken.
 
 ### Custom rules (admin page)
 
@@ -265,6 +279,8 @@ kb 1 15                 speaker ends agenda -- round resets, moves back to Strat
 | `settings_page.h` | Settings page HTML served at /settings |
 | `web_server.h` | WiFi station+AP, WebSocket state push, seat claims, command queue |
 | `save_state.h` | Power loss recovery: saves the running game to flash and restores it |
+| `map_state.h` | Tile number and rotation per hex, saved to flash |
+| `tile_script.h` | Tile and faction image loader and TTS map string parser, served at /tiles.js |
 
 ## LED Map
 

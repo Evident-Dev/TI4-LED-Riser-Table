@@ -11,6 +11,8 @@
 #include "play_page.h"
 #include "settings_page.h"
 #include "led_control.h"
+#include "map_state.h"
+#include "tile_script.h"
 
 // =============================================================================
 // TI4 Hex Riser - Network: WiFi + ESPAsyncWebServer + WebSocket
@@ -21,6 +23,7 @@
 //   GET /projector     -> full-screen board mirror for a projector
 //   GET /board.js      -> board renderer shared by projector and admin
 //   GET /theme.css     -> holo button theme shared by every page
+//   GET /tiles.js      -> tile and faction image loader shared by every page
 //   GET /play, /player -> player seat select + phase-aware keypad
 //   GET /admin         -> game master controls
 //   GET /settings      -> runtime settings page
@@ -32,15 +35,19 @@
 // WebSocket, server -> client:
 //   binary [0x01][366 x RGB]   side colors for hex 0 side 0 .. hex 60 side 5
 //   text   {"t":"game",...}    game state JSON (phase, players, seats, turn; boot=1 while starting up; bid = boot ID)
+//   text   {"t":"map",...}     tile number and rotation per hex, on connect and on change
+//   text   FACTIONTAKEN        faction pick refused, another seat has it
 //   text   CLAIMED:seat:token / DENIED:seat:reason   claim responses
 //
 // WebSocket, client -> server:
 //   CLAIM:seat:token:name      claim a seat (token 0 = new claim; a matching token rejoins a reserved seat)
 //   RESUME                     resume the saved game after a power loss
 //   RELEASE:seat:token         give up a seat
+//   FACTION:seat:token:faction:homeTile   pick a faction during setup ("" clears)
 //   KEY:seat:key:token         keypad press, routed through the command queue
 //   ADMIN:SETPLAYERS:n / STARTGAME / PHASE:n / BATTLE:a:d / ENDBATTLE
 //        / RESET / KICK:seat / SPEAKER:seat / TURN:seat / NEWGAME
+//        / TILE:hex:rotation:tile / CLEARMAP   (map edits, setup only)
 //   BRIGHTNESS:n, EFFECT:name, SETHEX..., CLAIMHEX..., ALL:...  (board tools)
 //
 // Threading:
@@ -63,11 +70,15 @@ static uint32_t bootIdentifier = 0;                  // random per boot; pages r
 // A reserved seat came back from a saved game: the phone with the matching
 // token rejoins it, and anyone else can still take it.
 // -----------------------------------------------------------------------------
+#define FACTION_LENGTH 24
+
 struct Seat {
   bool     claimed;
   bool     reserved;
   uint32_t token;
   char     name[17];
+  char     faction[FACTION_LENGTH];       // CDN faction id, "" = none
+  char     homeTile[MAP_TILE_LENGTH];     // that faction's home system tile
 };
 static Seat seats[MAX_PLAYERS] = {};
 
@@ -233,6 +244,8 @@ void drainWebCommands() {
 // LED side-state frame: [0x01] + 366 sides x 3 bytes RGB
 // -----------------------------------------------------------------------------
 #define LED_FRAME_LEN (1 + NUM_HEXES * 6 * 3)
+#define GAME_JSON_LENGTH 2800
+#define MAP_JSON_LENGTH  800
 
 size_t buildLedFrame(uint8_t* buf) {
   buf[0] = 0x01;
@@ -263,6 +276,13 @@ int buildGameJson(char* buf, size_t bufLen) {
     turn = gameState.actionOrder[gameState.currentActionIndex];
   }
 
+  // One character per hex: player index, or '-' when nobody owns it
+  char owners[NUM_HEXES + 1];
+  for (int hexIndex = 0; hexIndex < NUM_HEXES; hexIndex++) {
+    owners[hexIndex] = (hexOwner[hexIndex] >= 0) ? (char)('0' + hexOwner[hexIndex]) : '-';
+  }
+  owners[NUM_HEXES] = 0;
+
   uint8_t colorMask = 0, cardMask = 0;
   for (uint8_t i = 0; i < 8; i++) {
     if (gameState.colorTaken[i]) colorMask |= (1 << i);
@@ -280,7 +300,7 @@ int buildGameJson(char* buf, size_t bufLen) {
   int pos = snprintf(buf, bufLen,
     "{\"t\":\"game\",\"phase\":%d,\"speaker\":%d,\"n\":%d,\"picker\":%d,\"turn\":%d,"
     "\"pend\":%d,\"atk\":%d,\"def\":%d,\"cTaken\":%u,\"kTaken\":%u,"
-    "\"agOpt\":%d,\"dbl\":%d,\"cust\":%d,\"boot\":%d,\"bid\":%lu,\"gid\":%lu,\"rec\":%d,\"recPhase\":%d,\"recPlayers\":%d,\"players\":[",
+    "\"agOpt\":%d,\"dbl\":%d,\"cust\":%d,\"boot\":%d,\"bid\":%lu,\"gid\":%lu,\"rec\":%d,\"recPhase\":%d,\"recPlayers\":%d,\"own\":\"%s\",\"players\":[",
     (int)gameState.currentPhase,
     (int)gameState.speakerIndex,
     (int)gameState.numActivePlayers,
@@ -297,12 +317,14 @@ int buildGameJson(char* buf, size_t bufLen) {
     (unsigned long)gameIdentifier,
     isRecoveryPending() ? 1 : 0,
     isRecoveryPending() ? (int)savedGamePhase() : -1,
-    isRecoveryPending() ? (int)savedGamePlayerCount() : 0);
+    isRecoveryPending() ? (int)savedGamePlayerCount() : 0,
+    owners);
 
   for (uint8_t i = 0; i < MAX_PLAYERS; i++) {
     pos += snprintf(buf + pos, bufLen - pos,
       "%s{\"a\":%d,\"col\":\"%06lX\",\"ci\":%d,\"cl\":%d,\"sc\":%d,\"sc2\":%d,\"pk\":%d,"
-      "\"sl\":%d,\"pa\":%d,\"rd\":%d,\"st\":%d,\"rs\":%d,\"nm\":\"%s\"}",
+      "\"sl\":%d,\"pa\":%d,\"rd\":%d,\"st\":%d,\"rs\":%d,\"nm\":\"%s\","
+      "\"fa\":\"%s\",\"ht\":\"%s\",\"hh\":%d}",
       i > 0 ? "," : "",
       players[i].active ? 1 : 0,
       (unsigned long)players[i].colorHex,
@@ -316,7 +338,10 @@ int buildGameJson(char* buf, size_t bufLen) {
       players[i].readyForNext ? 1 : 0,
       seats[i].claimed ? 1 : 0,
       seats[i].reserved ? 1 : 0,
-      (seats[i].claimed || seats[i].reserved) ? seats[i].name : "");
+      (seats[i].claimed || seats[i].reserved) ? seats[i].name : "",
+      seats[i].faction,
+      seats[i].homeTile,
+      players[i].active ? (int)players[i].homeHex : -1);
     if (pos >= (int)bufLen - 2) break;
   }
   pos += snprintf(buf + pos, bufLen - pos, "]}");
@@ -351,9 +376,17 @@ void wsBroadcastTick() {
     }
   }
 
+  static uint32_t lastMapRevision = 0;
+  if (lastMapRevision != mapRevision) {
+    lastMapRevision = mapRevision;
+    static char mapJson[MAP_JSON_LENGTH];
+    buildMapJson(mapJson, sizeof(mapJson));
+    _ws.textAll(mapJson);
+  }
+
   if (now - lastJson >= 300) {
     lastJson = now;
-    static char json[1600];
+    static char json[GAME_JSON_LENGTH];
     buildGameJson(json, sizeof(json));
     _ws.textAll(json);
   }
@@ -391,7 +424,9 @@ static void handleClaim(AsyncWebSocketClient* client, const char* args) {
     // New holder, or someone taking over a reserved seat: fresh token voids the old one
     seats[seat].token = esp_random();
     if (seats[seat].token == 0) seats[seat].token = 1;
-    seats[seat].name[0] = 0;
+    seats[seat].name[0]     = 0;
+    seats[seat].faction[0]  = 0;
+    seats[seat].homeTile[0] = 0;
   }
   seats[seat].claimed  = true;
   seats[seat].reserved = false;
@@ -413,6 +448,46 @@ static void handleRelease(const char* args) {
   if (seats[seat].claimed && seats[seat].token == token) {
     seats[seat] = Seat{};
   }
+}
+
+// args: seat:token:faction:homeTile. Setup only; one seat per faction.
+static void handleFaction(AsyncWebSocketClient* client, const char* args) {
+  if (gameState.currentPhase != PHASE_SETUP) return;
+  int seat = atoi(args);
+  const char* tokenStart = strchr(args, ':');
+  if (!tokenStart || seat < 0 || seat >= MAX_PLAYERS) return;
+  uint32_t token = strtoul(tokenStart + 1, nullptr, 10);
+  if (!seats[seat].claimed || seats[seat].token != token) return;
+
+  const char* factionStart = strchr(tokenStart + 1, ':');
+  if (!factionStart) return;
+  factionStart++;
+  const char* homeTileStart = strchr(factionStart, ':');
+
+  char faction[FACTION_LENGTH] = {};
+  char homeTile[MAP_TILE_LENGTH] = {};
+  size_t factionLength = homeTileStart ? (size_t)(homeTileStart - factionStart) : strlen(factionStart);
+  if (factionLength >= sizeof(faction)) return;
+  memcpy(faction, factionStart, factionLength);
+  for (size_t index = 0; index < factionLength; index++) {
+    if (!isalnum((unsigned char)faction[index]) && faction[index] != '_') return;
+  }
+  if (homeTileStart) {
+    strncpy(homeTile, homeTileStart + 1, sizeof(homeTile) - 1);
+    if (!isValidTileNumber(homeTile)) homeTile[0] = 0;
+  }
+
+  if (faction[0]) {
+    for (uint8_t otherSeat = 0; otherSeat < MAX_PLAYERS; otherSeat++) {
+      if (otherSeat == seat || !players[otherSeat].active) continue;
+      if (strcmp(seats[otherSeat].faction, faction) == 0) {
+        client->text("FACTIONTAKEN");
+        return;
+      }
+    }
+  }
+  memcpy(seats[seat].faction, faction, sizeof(faction));
+  memcpy(seats[seat].homeTile, faction[0] ? homeTile : "", faction[0] ? sizeof(homeTile) : 1);
 }
 
 static void handleKey(const char* args) {
@@ -457,6 +532,18 @@ static void handleAdmin(const char* args) {
     if (gameState.currentPhase == PHASE_SETUP) gameOpts.doubleCardsFor4P = (args[8] == '1');
   } else if (strncmp(args, "CUST:", 5) == 0) {
     gameOpts.custodiansTaken = (args[5] == '1');
+  } else if (strncmp(args, "TILE:", 5) == 0) {
+    // TILE:hex:rotation:tile — an empty tile clears the hex
+    if (gameState.currentPhase != PHASE_SETUP) return;
+    int hexIndex = atoi(args + 5);
+    const char* rotationStart = strchr(args + 5, ':');
+    if (!rotationStart) return;
+    int rotation = atoi(rotationStart + 1);
+    const char* tileStart = strchr(rotationStart + 1, ':');
+    if (!tileStart) return;
+    setMapTile(hexIndex, tileStart + 1, (uint8_t)constrain(rotation, 0, 5));
+  } else if (strcmp(args, "CLEARMAP") == 0) {
+    if (gameState.currentPhase == PHASE_SETUP) clearMap();
   } else if (strncmp(args, "KICK:", 5) == 0) {
     int seat = atoi(args + 5);
     if (seat >= 0 && seat < MAX_PLAYERS) seats[seat] = Seat{};
@@ -469,6 +556,7 @@ static void handleWsMessage(AsyncWebSocketClient* client, char* msg) {
   if      (strncmp(msg, "CLAIM:",   6) == 0) handleClaim(client, msg + 6);
   else if (strncmp(msg, "RELEASE:", 8) == 0) handleRelease(msg + 8);
   else if (strncmp(msg, "KEY:",     4) == 0) handleKey(msg + 4);
+  else if (strncmp(msg, "FACTION:", 8) == 0) handleFaction(client, msg + 8);
   else if (strncmp(msg, "ADMIN:",   6) == 0) handleAdmin(msg + 6);
   else if (strcmp(msg, "RESUME") == 0)       queueWebCmd(WCMD_RESUME);
   else parseWSCommand(msg);
@@ -482,9 +570,12 @@ static void onWsEvent(AsyncWebSocket* server, AsyncWebSocketClient* client,
     static uint8_t frame[LED_FRAME_LEN];
     size_t frameLen = buildLedFrame(frame);
     client->binary(frame, frameLen);
-    static char json[1600];
+    static char json[GAME_JSON_LENGTH];
     buildGameJson(json, sizeof(json));
     client->text(json);
+    static char mapJson[MAP_JSON_LENGTH];
+    buildMapJson(mapJson, sizeof(mapJson));
+    client->text(mapJson);
 
   } else if (type == WS_EVT_DATA) {
     AwsFrameInfo* info = (AwsFrameInfo*)arg;
@@ -590,6 +681,10 @@ void initNetwork() {
 
   _server.on("/theme.css", HTTP_GET, [](AsyncWebServerRequest* request) {
     request->send(200, F("text/css"), THEME_STYLE);
+  });
+
+  _server.on("/tiles.js", HTTP_GET, [](AsyncWebServerRequest* request) {
+    request->send(200, F("application/javascript"), TILE_SCRIPT);
   });
 
   _server.on("/play", HTTP_GET, [](AsyncWebServerRequest* request) {

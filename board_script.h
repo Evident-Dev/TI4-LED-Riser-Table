@@ -7,9 +7,12 @@
 // pages. Flat-top hexes, columns 5-6-7-8-9-8-7-6-5, one SVG line per hex side
 // driven by the binary LED frame [0x01][366 x RGB].
 //
-//   createHexBoard(svgElement, { onHexClick: function (hexIndex) {} })
-//     -> { renderLedFrame(bytes), setSelectedHex(hexIndex) }
-//   connectTable({ onFrame, onGame, onText, onOnline }) -> { send(message) }
+//   createHexBoard(svgElement, { onHexClick: function (hexIndex) {}, claimIcons: true })
+//     -> { renderLedFrame(bytes), setSelectedHex(hexIndex), setMap(map), setGame(game),
+//          ttsOrder, tileAt(hexIndex) }
+//     Tile art comes from /tiles.js when the page loads it and the CDN is reachable.
+//     claimIcons puts the owner's faction icon on claimed hexes.
+//   connectTable({ onFrame, onGame, onMap, onText, onOnline }) -> { send(message) }
 //     also shows a full-screen splash while the table is booting or offline
 //   confirmModal(message, action, { confirmLabel, danger })
 //     in-page confirmation used instead of the browser's confirm()
@@ -41,8 +44,10 @@ const char BOARD_SCRIPT[] = R"=====(
   boardStyle.textContent =
     '.hex { fill: #0a1726; stroke: #38d6ff26; stroke-width: 1.5; }' +
     '.hex-board.clickable .hex { cursor: pointer; }' +
-    '.hex-board.clickable .hex:hover { stroke: #7fe6ff; stroke-width: 2; }' +
-    '.hex.selected { fill: #0e3550; stroke: #7fe6ff; stroke-width: 2; }' +
+    '.hex-tile, .hex-claim { pointer-events: none; }' +
+    '.hex-outline { fill: none; stroke: transparent; stroke-width: 2; pointer-events: none; }' +
+    '.hex-board.clickable g:hover .hex-outline { stroke: #7fe6ff; }' +
+    '.hex-outline.selected { fill: #38d6ff26; stroke: #7fe6ff; stroke-width: 2.5; }' +
     '.hex-side { stroke: transparent; stroke-width: 5; stroke-linecap: round; fill: none; pointer-events: none; }' +
     '.hex-board text { font-family: system-ui, sans-serif; font-size: 12px; font-weight: 500;' +
     '  fill: #47556988; text-anchor: middle; dominant-baseline: central; pointer-events: none; }';
@@ -181,13 +186,53 @@ const char BOARD_SCRIPT[] = R"=====(
     return corners;
   }
 
+  // Axial coordinates per hex (flat-top, center hex at 0,0, r grows downward)
+  var hexAxial = [];
+  COLUMNS.forEach(function (column, columnIndex) {
+    var q = columnIndex - (COLUMNS.length - 1) / 2;
+    for (var row = 0; row < column.count; row++) {
+      var hexIndex = column.topStart ? column.start + row : column.start + (column.count - 1 - row);
+      hexAxial[hexIndex] = { q: q, r: row - (column.count - 1) / 2 - q / 2 };
+    }
+  });
+
+  // Hex index for each spot in a TTS map string: center first, then each
+  // ring from its top hex going clockwise
+  var TTS_ORDER = (function () {
+    var hexByAxial = {};
+    hexAxial.forEach(function (axial, hexIndex) { hexByAxial[axial.q + ',' + axial.r] = hexIndex; });
+    var clockwiseSteps = [[1, 0], [0, 1], [-1, 1], [-1, 0], [0, -1], [1, -1]];
+    var order = [hexByAxial['0,0']];
+    for (var ring = 1; ring <= 4; ring++) {
+      var q = 0, r = -ring;
+      clockwiseSteps.forEach(function (step) {
+        for (var count = 0; count < ring; count++) {
+          order.push(hexByAxial[q + ',' + r]);
+          q += step[0]; r += step[1];
+        }
+      });
+    }
+    return order;
+  })();
+
+  if (!window.tileImageUrl)  window.tileImageUrl  = function () { return null; };
+  if (!window.factionIconUrl) window.factionIconUrl = function () { return null; };
+
   window.createHexBoard = function (svg, options) {
     options = options || {};
     var sideElements   = new Array(HEX_COUNT * 6).fill(null);
     var previousColors = new Int32Array(HEX_COUNT * 6).fill(-1);
-    var hexPolygons    = new Array(HEX_COUNT).fill(null);
+    var hexOutlines    = new Array(HEX_COUNT).fill(null);
+    var hexParts       = new Array(HEX_COUNT).fill(null);  // { group, centerX, centerY, label, tile, claim }
     var selectedHex    = -1;
     var lastFrame      = null;
+    var mapTiles       = null;   // { tiles: [...], rot: "..." } from the table
+    var currentGame    = null;
+    var tableData      = null;   // CDN indexes, null until loaded or when offline
+
+    if (window.loadTableData) {
+      window.loadTableData().then(function (data) { tableData = data; refreshHexes(); });
+    }
 
     var viewWidth   = (COLUMNS.length - 1) * COLUMN_SPACING + 2 * HEX_RADIUS + 20;
     var viewHeight  = MAX_COLUMN_HEIGHT * HEX_HEIGHT + 30;
@@ -211,12 +256,28 @@ const char BOARD_SCRIPT[] = R"=====(
           var centerY  = columnTop + row * HEX_HEIGHT;
           var group    = document.createElementNS(SVG_NAMESPACE, 'g');
 
+          var points = getCorners(centerX, centerY, HEX_RADIUS - 1)
+            .map(function (point) { return point.x.toFixed(2) + ',' + point.y.toFixed(2); }).join(' ');
           var polygon = document.createElementNS(SVG_NAMESPACE, 'polygon');
-          polygon.setAttribute('points', getCorners(centerX, centerY, HEX_RADIUS - 1)
-            .map(function (point) { return point.x.toFixed(2) + ',' + point.y.toFixed(2); }).join(' '));
-          polygon.setAttribute('class', 'hex' + (hexIndex === selectedHex ? ' selected' : ''));
-          hexPolygons[hexIndex] = polygon;
+          polygon.setAttribute('points', points);
+          polygon.setAttribute('class', 'hex');
           group.appendChild(polygon);
+
+          var tile = document.createElementNS(SVG_NAMESPACE, 'image');
+          tile.setAttribute('class', 'hex-tile');
+          tile.setAttribute('x', (centerX - (HEX_RADIUS - 1)).toFixed(2));
+          tile.setAttribute('y', (centerY - (HEX_HEIGHT - 2) / 2).toFixed(2));
+          tile.setAttribute('width', (2 * (HEX_RADIUS - 1)).toFixed(2));
+          tile.setAttribute('height', (HEX_HEIGHT - 2).toFixed(2));
+          tile.setAttribute('preserveAspectRatio', 'none');
+          tile.style.display = 'none';
+          group.appendChild(tile);
+
+          var outline = document.createElementNS(SVG_NAMESPACE, 'polygon');
+          outline.setAttribute('points', points);
+          outline.setAttribute('class', 'hex-outline' + (hexIndex === selectedHex ? ' selected' : ''));
+          hexOutlines[hexIndex] = outline;
+          group.appendChild(outline);
           if (options.onHexClick) {
             group.addEventListener('click', (function (index) {
               return function () { options.onHexClick(index); };
@@ -240,9 +301,108 @@ const char BOARD_SCRIPT[] = R"=====(
           label.textContent = hexIndex;
           group.appendChild(label);
           svg.appendChild(group);
+
+          hexParts[hexIndex] = { group: group, centerX: centerX, centerY: centerY,
+                                 label: label, tile: tile, tileUrl: null, tileFailed: false, claim: null };
         }
       });
       if (lastFrame) renderLedFrame(lastFrame);
+      refreshHexes();
+    }
+
+    // Tile on a hex: the map's tile, or the home system of the faction whose
+    // player sits there
+    function tileAt(hexIndex) {
+      var tileNumber = mapTiles && mapTiles.tiles[hexIndex];
+      if (tileNumber) return { tileNumber: tileNumber, rotation: +(mapTiles.rot.charAt(hexIndex) || 0) };
+      if (!currentGame) return null;
+      for (var playerIndex = 0; playerIndex < currentGame.players.length; playerIndex++) {
+        var player = currentGame.players[playerIndex];
+        if (player.a && player.hh === hexIndex && player.ht && player.ht !== '0') {
+          return { tileNumber: player.ht, rotation: 0 };
+        }
+      }
+      return null;
+    }
+
+    function refreshHexes() {
+      var inSetup = !currentGame || currentGame.phase === 0;
+      for (var hexIndex = 0; hexIndex < HEX_COUNT; hexIndex++) {
+        var parts = hexParts[hexIndex];
+        if (!parts) continue;
+        var placed = tileAt(hexIndex);
+        var url = placed ? window.tileImageUrl(tableData, placed.tileNumber) : null;
+        if (url !== parts.tileUrl) {
+          parts.tileUrl = url;
+          parts.tileFailed = false;
+          if (url) {
+            parts.tile.onerror = (function (hexParts) {
+              return function () { hexParts.tileFailed = true; refreshHexes(); };
+            })(parts);
+            parts.tile.setAttribute('href', url);
+          }
+        }
+        var showTile = !!url && !parts.tileFailed;
+        parts.tile.style.display = showTile ? '' : 'none';
+        if (showTile) {
+          parts.tile.setAttribute('transform', 'rotate(' + (placed.rotation * 60) + ' ' +
+            parts.centerX.toFixed(2) + ' ' + parts.centerY.toFixed(2) + ')');
+        }
+        // Numbers help while building the map; once the game starts they go
+        parts.label.style.display = (!showTile && inSetup) ? '' : 'none';
+        refreshClaimIcon(hexIndex, parts);
+      }
+    }
+
+    // Owner's faction icon, just inside the hex's bottom edge
+    function refreshClaimIcon(hexIndex, parts) {
+      var iconUrl = null, ownerColor = null;
+      if (options.claimIcons && currentGame && currentGame.own) {
+        var owner = currentGame.own.charAt(hexIndex);
+        if (owner !== '-' && owner !== '') {
+          var player = currentGame.players[+owner];
+          if (player && player.fa) {
+            iconUrl = window.factionIconUrl(tableData, player.fa);
+            ownerColor = '#' + player.col;
+          }
+        }
+      }
+      if (!iconUrl) {
+        if (parts.claim) { parts.group.removeChild(parts.claim); parts.claim = null; }
+        return;
+      }
+      if (!parts.claim) {
+        var iconSize = HEX_RADIUS * 0.5;
+        var iconCenterY = parts.centerY + HEX_HEIGHT / 2 - iconSize / 2 - 3;
+        parts.claim = document.createElementNS(SVG_NAMESPACE, 'g');
+        parts.claim.setAttribute('class', 'hex-claim');
+        var backing = document.createElementNS(SVG_NAMESPACE, 'circle');
+        backing.setAttribute('cx', parts.centerX.toFixed(2));
+        backing.setAttribute('cy', iconCenterY.toFixed(2));
+        backing.setAttribute('r', (iconSize / 2 + 1.5).toFixed(2));
+        backing.setAttribute('fill', '#05070dd9');
+        backing.setAttribute('stroke-width', '1.5');
+        parts.claim.appendChild(backing);
+        var icon = document.createElementNS(SVG_NAMESPACE, 'image');
+        icon.setAttribute('x', (parts.centerX - iconSize / 2).toFixed(2));
+        icon.setAttribute('y', (iconCenterY - iconSize / 2).toFixed(2));
+        icon.setAttribute('width', iconSize.toFixed(2));
+        icon.setAttribute('height', iconSize.toFixed(2));
+        parts.claim.appendChild(icon);
+        parts.group.appendChild(parts.claim);
+      }
+      parts.claim.firstChild.setAttribute('stroke', ownerColor);
+      if (parts.claim.lastChild.getAttribute('href') !== iconUrl) parts.claim.lastChild.setAttribute('href', iconUrl);
+    }
+
+    function setMap(map) {
+      mapTiles = map;
+      refreshHexes();
+    }
+
+    function setGame(game) {
+      currentGame = game;
+      refreshHexes();
     }
 
     function renderLedFrame(bytes) {
@@ -261,9 +421,9 @@ const char BOARD_SCRIPT[] = R"=====(
     }
 
     function setSelectedHex(hexIndex) {
-      if (selectedHex >= 0 && hexPolygons[selectedHex]) hexPolygons[selectedHex].classList.remove('selected');
+      if (selectedHex >= 0 && hexOutlines[selectedHex]) hexOutlines[selectedHex].classList.remove('selected');
       selectedHex = hexIndex;
-      if (hexIndex >= 0 && hexPolygons[hexIndex]) hexPolygons[hexIndex].classList.add('selected');
+      if (hexIndex >= 0 && hexOutlines[hexIndex]) hexOutlines[hexIndex].classList.add('selected');
     }
 
     fetch('/getsettings', { cache: 'no-store' })
@@ -271,7 +431,14 @@ const char BOARD_SCRIPT[] = R"=====(
       .then(function (settings) { build(settings.sideGap != null ? +settings.sideGap : 4); })
       .catch(function () { build(4); });
 
-    return { renderLedFrame: renderLedFrame, setSelectedHex: setSelectedHex };
+    return {
+      renderLedFrame: renderLedFrame,
+      setSelectedHex: setSelectedHex,
+      setMap: setMap,
+      setGame: setGame,
+      ttsOrder: TTS_ORDER,
+      tileAt: tileAt
+    };
   };
 
   // Live connection to the table with auto-reconnect.
@@ -344,8 +511,9 @@ const char BOARD_SCRIPT[] = R"=====(
           else if (handlers.onFrame) handlers.onFrame(bytes);
         } else if (typeof event.data === 'string' && event.data.charAt(0) === '{') {
           try {
-            var game = JSON.parse(event.data);
-            if (game.t === 'game') handleGame(game, event.data);
+            var message = JSON.parse(event.data);
+            if (message.t === 'game') handleGame(message, event.data);
+            else if (message.t === 'map' && handlers.onMap) handlers.onMap(message);
           } catch (error) {}
         } else if (!offline && handlers.onText) {
           handlers.onText(event.data);
