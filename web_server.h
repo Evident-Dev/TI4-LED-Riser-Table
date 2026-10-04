@@ -38,6 +38,8 @@
 //   text   {"t":"map",...}     tile number and rotation per hex, on connect and on change
 //   text   FACTIONTAKEN        faction pick refused, another seat has it
 //   text   CLAIMED:seat:token / DENIED:seat:reason   claim responses
+//          (reason "taken", or "gone" when a rejoin token no longer matches the seat)
+//   text   KICKED:seat         the admin cleared that seat
 //
 // WebSocket, client -> server:
 //   CLAIM:seat:token:name      claim a seat (token 0 = new claim; a matching token rejoins a reserved seat)
@@ -415,6 +417,12 @@ static void handleClaim(AsyncWebSocketClient* client, const char* args) {
   char reply[48];
   bool sameHolder = (seats[seat].claimed || seats[seat].reserved)
                     && token != 0 && seats[seat].token == token;
+  // A rejoin with a token the seat no longer holds (kicked, or an older game)
+  if (token != 0 && !sameHolder) {
+    snprintf(reply, sizeof(reply), "DENIED:%d:gone", seat);
+    client->text(reply);
+    return;
+  }
   if (seats[seat].claimed && !sameHolder) {
     snprintf(reply, sizeof(reply), "DENIED:%d:taken", seat);
     client->text(reply);
@@ -546,7 +554,12 @@ static void handleAdmin(const char* args) {
     if (gameState.currentPhase == PHASE_SETUP) clearMap();
   } else if (strncmp(args, "KICK:", 5) == 0) {
     int seat = atoi(args + 5);
-    if (seat >= 0 && seat < MAX_PLAYERS) seats[seat] = Seat{};
+    if (seat >= 0 && seat < MAX_PLAYERS) {
+      seats[seat] = Seat{};
+      char notice[16];
+      snprintf(notice, sizeof(notice), "KICKED:%d", seat);
+      _ws.textAll(notice);
+    }
   }
 }
 

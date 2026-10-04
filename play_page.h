@@ -313,7 +313,18 @@ function connect() {
       render();
     } else if (ev.data === 'FACTIONTAKEN') {
       toast('Faction already taken');
+    } else if (ev.data.indexOf('KICKED:') === 0) {
+      if (parseInt(ev.data.split(':')[1]) === mySeat) {
+        forgetSeat();
+        toast('You were removed from your seat');
+      }
     } else if (ev.data.indexOf('DENIED:') === 0) {
+      // "gone": our saved seat belongs to someone else now, so pick again
+      if (ev.data.split(':')[2] === 'gone') {
+        forgetSeat();
+        toast('Pick a seat');
+        return;
+      }
       seated = false;
       myToken = '0';
       localStorage.removeItem('ti4Token');
