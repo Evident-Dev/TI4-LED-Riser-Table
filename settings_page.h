@@ -40,6 +40,9 @@ const char SETTINGS_PAGE[] PROGMEM = R"rawhtml(<!DOCTYPE html>
 <div class="row"><label>Network Password</label><input type="password" id="homePass"></div>
 <div class="row"><label>AP SSID</label><input type="text" id="apSSID"></div>
 <div class="row"><label>AP Password</label><input type="password" id="apPass"></div>
+<div class="row"><label>Hostname</label><input type="text" id="hostname" maxlength="31"><span class="note" id="hostname-address"></span></div>
+<div class="row"><label>Keep AP On</label><input type="checkbox" id="keepAccessPoint"><span class="note">board's own WiFi stays on after joining a network</span></div>
+<div class="row" id="network-address-row" hidden><label>Network Address</label><span id="network-address"></span></div>
 <div class="row"><label>Network Timeout (ms)</label><input type="number" id="homeTimeoutMs" min="1000" max="30000" step="1000"></div>
 
 <h2 class="panel-label">LED</h2>
@@ -89,6 +92,11 @@ function loadSettings() {
     document.getElementById('debugLed').checked      = d.debugLed        || false;
     document.getElementById('debugKeyboard').checked = d.debugKeyboard   || false;
     document.getElementById('thinSides').value       = d.thinSides ? '1' : '0';
+    document.getElementById('hostname').value        = d.hostname || 'ti4table';
+    document.getElementById('hostname-address').textContent = 'http://' + (d.hostname || 'ti4table') + '.local';
+    document.getElementById('keepAccessPoint').checked = d.keepAccessPoint !== false;
+    document.getElementById('network-address').textContent = 'http://' + d.networkAddress;
+    document.getElementById('network-address-row').hidden = !d.networkAddress;
   }).catch(function(){setStatus('Could not load settings from board.', false);});
 }
 
@@ -114,6 +122,8 @@ function saveSettings() {
     encodeField('debugLed',          document.getElementById('debugLed').checked ? '1' : '0'),
     encodeField('debugKeyboard',     document.getElementById('debugKeyboard').checked ? '1' : '0'),
     encodeField('thinSides',         document.getElementById('thinSides').value),
+    encodeField('hostname',          document.getElementById('hostname').value),
+    encodeField('keepAccessPoint',   document.getElementById('keepAccessPoint').checked ? '1' : '0'),
   ].join('&');
   fetch('/savesettings?' + params)
     .then(function(){setStatus('Saved. Reboot the board for WiFi changes to take effect.', true);})

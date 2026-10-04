@@ -1,6 +1,7 @@
 #pragma once
 #include <WiFi.h>
 #include <ESPAsyncWebServer.h>
+#include <ESPmDNS.h>
 #include "config.h"
 #include "runtime_settings.h"
 #include "home_page.h"
@@ -623,6 +624,7 @@ void initNetwork() {
     }
 
     WiFi.mode(WIFI_STA);
+    WiFi.setHostname(rtCfg.hostname);
     WiFi.begin(rtCfg.homeSSID, rtCfg.homePass);
 
     uint32_t start = millis();
@@ -670,6 +672,26 @@ void initNetwork() {
     }
   }
 
+  // Board's own WiFi stays reachable at 192.168.4.1 alongside the network
+  if (stationOK && rtCfg.keepAccessPoint) {
+    WiFi.mode(WIFI_AP_STA);
+    if (WiFi.softAP(rtCfg.apSSID, rtCfg.apPass) && rtCfg.debugSerial) {
+      Serial.print(F("WiFi: AP '"));
+      Serial.print(rtCfg.apSSID);
+      Serial.println(F("' also on -> http://192.168.4.1"));
+    }
+  }
+
+  // name.local on whichever network the board is on
+  if (networkReady && rtCfg.hostname[0] && MDNS.begin(rtCfg.hostname)) {
+    MDNS.addService("http", "tcp", HTTP_PORT);
+    if (rtCfg.debugSerial) {
+      Serial.print(F("WiFi: also at http://"));
+      Serial.print(rtCfg.hostname);
+      Serial.println(F(".local"));
+    }
+  }
+
   // ------------------------------------------------------------------
   // 3. Register routes
   // ------------------------------------------------------------------
@@ -714,7 +736,7 @@ void initNetwork() {
 
   // GetSettings — return current rtCfg as JSON
   _server.on("/getsettings", HTTP_GET, [](AsyncWebServerRequest* request) {
-    char buf[512];
+    char buf[768];
     snprintf(buf, sizeof(buf),
       "{\"homeSSID\":\"%s\","
       "\"homePass\":\"%s\","
@@ -731,7 +753,10 @@ void initNetwork() {
       "\"debugWeb\":%s,"
       "\"debugLed\":%s,"
       "\"debugKeyboard\":%s,"
-      "\"thinSides\":%s}",
+      "\"thinSides\":%s,"
+      "\"hostname\":\"%s\","
+      "\"keepAccessPoint\":%s,"
+      "\"networkAddress\":\"%s\"}",
       rtCfg.homeSSID, rtCfg.homePass,
       rtCfg.apSSID,   rtCfg.apPass,
       (unsigned long)rtCfg.homeTimeoutMs,
@@ -742,7 +767,10 @@ void initNetwork() {
       rtCfg.debugWeb         ? "true" : "false",
       rtCfg.debugLed         ? "true" : "false",
       rtCfg.debugKeyboard    ? "true" : "false",
-      rtCfg.thinSides        ? "true" : "false"
+      rtCfg.thinSides        ? "true" : "false",
+      rtCfg.hostname,
+      rtCfg.keepAccessPoint  ? "true" : "false",
+      WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString().c_str() : ""
     );
     request->send(200, "application/json", buf);
   });
@@ -788,6 +816,11 @@ void handleNetwork() {}
 
 // Prints the current WiFi mode and browsing address.
 void printNetworkInfo() {
+  if (rtCfg.hostname[0]) {
+    Serial.print(F("WiFi: http://"));
+    Serial.print(rtCfg.hostname);
+    Serial.println(F(".local"));
+  }
   if (WiFi.getMode() == WIFI_AP) {
     Serial.print(F("WiFi: AP '"));
     Serial.print(rtCfg.apSSID);
@@ -904,6 +937,17 @@ static void urlDecode(const char* src, char* dst, size_t dstLen) {
   dst[i] = 0;
 }
 
+// Hostnames are lowercase letters, digits and hyphens; anything else is dropped
+static void setHostname(const char* requested) {
+  size_t length = 0;
+  for (size_t index = 0; requested[index] && length < sizeof(rtCfg.hostname) - 1; index++) {
+    char character = tolower((unsigned char)requested[index]);
+    if (isalnum((unsigned char)character) || (character == '-' && length > 0)) rtCfg.hostname[length++] = character;
+  }
+  rtCfg.hostname[length] = 0;
+  if (length == 0) strncpy(rtCfg.hostname, NETWORK_HOSTNAME, sizeof(rtCfg.hostname) - 1);
+}
+
 // -----------------------------------------------------------------------------
 // parseSaveSettings — update rtCfg from /savesettings query string
 // -----------------------------------------------------------------------------
@@ -937,6 +981,8 @@ void parseSaveSettings(const String& query) {
     else if (key == "debugLed")          rtCfg.debugLed          = (decoded[0] == '1');
     else if (key == "debugKeyboard")     rtCfg.debugKeyboard     = (decoded[0] == '1');
     else if (key == "thinSides")         rtCfg.thinSides         = (decoded[0] == '1');
+    else if (key == "keepAccessPoint")   rtCfg.keepAccessPoint   = (decoded[0] == '1');
+    else if (key == "hostname")          setHostname(decoded);
 
     pos = ampPos + 1;
   }

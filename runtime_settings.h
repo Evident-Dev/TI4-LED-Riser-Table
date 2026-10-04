@@ -38,6 +38,8 @@ struct RuntimeConfig {
 
   // Added later: new fields go at the end so older saves still load
   bool     thinSides;           // thinner LED side lines in the browser
+  char     hostname[32];        // name.local on the network
+  bool     keepAccessPoint;     // keep the board's own WiFi on after joining a network
 };
 
 // One global instance — initialized from config.h defaults at boot.
@@ -59,7 +61,9 @@ RuntimeConfig rtCfg = {
   DEBUG_WEB_TEST,
   DEBUG_LED_TEST,
   DEBUG_KEYBOARD_TEST,
-  THIN_SIDES
+  THIN_SIDES,
+  NETWORK_HOSTNAME,
+  KEEP_ACCESS_POINT
 };
 
 // Bump when RuntimeConfig changes so old saved bytes are ignored
