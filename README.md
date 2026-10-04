@@ -1,64 +1,137 @@
 # TI4 Hex Riser Firmware
 
-Arduino Giga R1 WiFi firmware for a 61-hex Twilight Imperium 4 LED riser table.
+ESP32-S3 firmware for a 61-hex Twilight Imperium 4 LED riser table. Players use their phones as controllers over WiFi. Dual-core architecture: Core 0 drives the LED strip, Core 1 runs the game state machine, web commands, and serial commands.
 
 ## Hardware
 
 | Component | Spec |
 |---|---|
-| MCU | Arduino Giga R1 WiFi |
-| LEDs | 915x SK6812 RGBW, GPIO 6 |
-| Keyboard I2C | MCP23017 x4, GPIO 20 (SDA) / 21 (SCL) |
+| Board | Lonely Binary ESP32-S3-DevKitC-1 v1.6 (Gold Edition) |
+| Module | ESP32-S3-WROOM-1-N16R8 |
+| CPU | Dual-core Xtensa LX7 @ 240 MHz |
+| Flash | 16 MB QSPI |
+| PSRAM | 8 MB Octal SPI |
+| LEDs | 915x SK6812 (RGB, GRB order), GPIO 13 |
 | Power | 5V 60A PSU |
 
 ## Required Libraries
 
 Install via Arduino IDE Library Manager:
 
-| Library | Author | Purpose |
-|---|---|---|
-| FastLED | Daniel Garcia | LED control and animations |
-| Adafruit MCP23X17 | Adafruit | Keyboard I2C (stub until boards arrive) |
+| Library | Author | Version | Purpose |
+|---|---|---|---|
+| FastLED | Daniel Garcia | **3.10.3** | LED control and animations |
+| ESP Async WebServer | ESP32Async | latest | Async HTTP + WebSocket server |
+| Async TCP | ESP32Async | latest | Required by ESP Async WebServer |
+
+Keep FastLED on 3.10.3. Version 3.10.5 jams the LED driver on this strip and resets the board. Skip FastLED in the IDE's "updates available" prompt.
+
+Built against the ESP32 Arduino core 3.3.x (Espressif Systems).
+
+## USB Ports
+
+The board has two USB-C ports:
+
+- **USB**: the ESP32-S3's native USB. No driver needed. Use this one with the board settings below.
+- **UART**: a CH343 USB-to-serial bridge. Needs the WCH driver on Windows and macOS ([Windows](https://www.wch-ic.com/downloads/CH343SER_EXE.html), [macOS](https://www.wch-ic.com/downloads/CH34XSER_MAC_ZIP.html)).
 
 ## Upload Steps
 
-1. Open `TI4_HexRiser.ino` in Arduino IDE
-2. Install the libraries above
-3. Select **Tools > Board > Arduino Mbed OS Giga Boards > Arduino Giga R1 WiFi**
-4. Select **Tools > Port > your COM port**
-5. Click **Upload**
+1. Open `TI4_HexRiser.ino` in Arduino IDE. The folder holding the sketch must be named `TI4_HexRiser`, so clone into that folder name.
+2. Install all libraries above
+3. Select **Tools > Board > ESP32 Arduino > ESP32S3 Dev Module**
+4. Apply these board settings:
+
+| Setting | Value |
+|---|---|
+| USB CDC On Boot | Enabled |
+| CPU Frequency | 240MHz (WiFi) |
+| Flash Mode | QIO 80MHz |
+| Flash Size | 16MB (128Mb) |
+| Partition Scheme | 16M Flash (3MB APP/9.9MB FATFS) |
+| PSRAM | OPI PSRAM |
+| Upload Speed | 921600 |
+| USB Mode | Hardware CDC and JTAG |
+
+5. Select **Tools > Port >** the COM port for the **USB** port
+6. Click **Upload**
+
+## Core Architecture
+
+| Core | Responsibility |
+|---|---|
+| Core 0 | LED task, timing-critical, isolated from WiFi jitter |
+| Core 1 | `loop()`: game state machine, web command queue, serial command handler; state broadcast task |
+
+The LED task pushes frames at most every 30 ms (~33 fps). 915 LEDs take about 28 ms to send, so faster frames would only pile up in the driver. Game state writes to shared `hexColor[]` directly; the LED task picks up changes on the next frame.
 
 ## First Boot
 
 1. Open Serial Monitor at **115200 baud**
-2. The board will attempt to join the configured WiFi in `config.h`, then fall back to AP mode
+2. The board will attempt to join the network saved in Settings (first boot uses the defaults in `config.h`), then fall back to AP mode
 3. Connect your phone or laptop to WiFi **"TI4-HexRiser"** (password: **"twilight4"**) if using AP mode
-4. Open a browser and navigate to the IP shown in Serial Monitor (AP mode default: `http://192.168.3.1`)
-5. The hex grid should appear and sync live with the LED state
+4. Open a browser and navigate to the IP shown in Serial Monitor (AP mode default: `http://192.168.4.1`)
+5. The hex grid should appear and sync live with the LED state via WebSocket
 
 ## Web Interface
 
-- **Brightness slider** - adjusts global LED brightness
-- **Effect buttons** - Rainbow, Pulse, Spiral, Sparkle, Wave, Stop
-- **Side color controls** - set individual hex sides to any color
-- **Settings page** (gear icon) - change WiFi, LED, debug, and display settings at runtime
-- **Reboot button** - in Settings, reboots the board to apply WiFi credential changes
+All live pages share a single WebSocket (`/ws`). The board pushes LED
+state as a binary frame (all 366 hex sides) only when something changes, plus
+a game-state JSON every 300 ms — no polling.
 
-The browser polls the board every 100ms for the current LED state. The indicator dot in the sidebar shows connection status.
+If no game state arrives for 1 second the pages show a **Table offline** splash and keep reconnecting. While the controller boots they show **Table is booting** until the boot animation finishes, and after a restart they reload themselves so they always match the firmware.
+
+| Page | Who | What |
+|---|---|---|
+| `/` | Everyone | Home page with links to Admin, Player and Projector |
+| `/projector` | Projector / TV | Full-screen live board mirror, display only |
+| `/play` (or `/player`) | Players 1-8 | Phone keypad: claim a seat, then a phase-aware pad (color select, strategy cards, end turn / pass / battle, ready, agenda) |
+| `/admin` | Game master | Desktop and mobile. Live board with hex claiming, player count, force start, reset, phase jumps, custom rules, seat roster with kick, speaker token, battle, lighting |
+| `/settings` | — | WiFi, LED, debug, and display settings at runtime |
+
+### Playing from phones
+
+1. Game master opens `/admin` and sets the player count (this restarts setup and assigns home hexes)
+2. Each player opens `/play` on their phone, enters a name, and grabs an open seat
+3. Seats survive phone screen locks and reconnects — the claim token is stored in the browser
+4. Every keypad press goes through `handleGameKey()`, the same path as the `kb` serial command
+
+### Custom rules (admin page)
+
+Each button shows the phase it affects and its current setting. Tap to switch.
+
+- **Agenda: After Custodians / Every Round** (default After Custodians): with After Custodians, the agenda phase is skipped after status until the custodians token leaves Mecatol Rex. Claiming the center hex on the board marks it automatically; the admin can also toggle it.
+- **Strategy: 2 Cards Each / 1 Card Each** (default 2, shown only for 4 players): in 4-player games each player picks two strategy cards, going around the pick order twice. Initiative is the lowest card held.
+- **Speaker token** — no card grants the speaker token; when Politics changes the speaker, use the crown button on the seat roster.
+- **Turn override** — during the action phase, the Turn button on a seat makes it that player's turn. Play continues in initiative order from them.
+
+## Power Loss Recovery
+
+Once a game has started, the controller saves it to flash whenever something changes: a turn ends, a player passes, a card is locked, a hex is claimed, or the phase changes. A save either completes or leaves the previous one intact, so a power cut mid-save can't corrupt it.
+
+After a power loss, every page shows **Saved game found** with the phase and player count:
+
+- Players and the admin can **Resume**. The admin can also **Start New Game**, which discards the save.
+- On resume, seats come back **reserved**. Each phone stores its seat token with the game ID and rejoins its own seat automatically. Anyone else can still take a reserved seat, so a phone that never comes back doesn't block the game.
+- The active player's turn timer restarts.
+
+The save is cleared by Start New Game, Reset Game, or changing the player count. Nothing is saved during setup, so a new setup never prompts.
 
 ## Settings Page
 
-Navigate to the gear icon at the bottom of the sidebar to access runtime settings. Changes to LED and debug options take effect immediately. WiFi credential changes require a reboot.
+Open Settings from the admin page to change runtime settings. Saving writes them to flash, so they survive reboots and reflashing. LED and debug changes take effect immediately; network changes need a reboot.
+
+Saved settings override the defaults in `config.h`. Settings go back to the `config.h` defaults only if flash is erased or the settings layout changes in a firmware update.
 
 | Setting | Description |
 |---|---|
-| Home SSID / Password | Home network to connect to first |
+| Network SSID / Password | WiFi network to connect to first |
 | AP SSID / Password | Fallback access point credentials |
-| Home Timeout | How long to wait for home network before switching to AP |
+| Network Timeout | How long to wait for the network before switching to AP |
 | Default Brightness | Startup brightness (0-255) |
 | Max Brightness | Hard cap for the brightness slider |
-| LED Update Rate | Animation tick interval in ms |
-| Broadcast Rate | How often the board sends state to the browser (ms) |
+| LED Update Rate | Animation tick interval in ms (30 ms minimum is enforced) |
+| Broadcast Rate | How often the board pushes state to the browser (ms) |
 | Side Gap | Inset of the colored side lines in the browser (0 = touching, higher = more gap) |
 | Simulate Hardware | Skip FastLED.show() -- use this when testing without the strip connected |
 | Debug flags | Enable serial logging for various subsystems |
@@ -69,26 +142,26 @@ Open Serial Monitor at **115200 baud**. All commands are case-insensitive where 
 
 ### Game Simulation Commands
 
-These simulate physical keyboard presses and game flow for testing without hardware.
+These simulate phone keypad presses and game flow for testing without phones.
 
 | Command | Effect |
 |---|---|
 | `setplayers <4-8>` | Set how many players are active and restart the setup phase |
-| `kb <1-8> <0-15>` | Simulate player N pressing key K on their keyboard |
+| `kb <1-8> <0-15>` | Simulate player N pressing key K on their phone keypad |
 | `startgame` | GM force-start: locks any unlocked players and runs speaker selection |
 | `phase <0-4>` | Jump directly to a phase (0=Setup, 1=Strategy, 2=Action, 3=Status, 4=Agenda) |
 | `battle <P1> <P2>` | Trigger battle mode between two players (e.g. `battle 1 3`) |
 | `status` | Print current phase, all player states, home hexes, and WiFi IP |
 
-### Keyboard Key Reference
+### Key Reference
 
-Each player has a 4x4 keyboard (keys 0-15). What each key does depends on the current phase:
+The phone keypad sends these key numbers, and `kb` uses them too. What each key does depends on the current phase:
 
 | Key | Setup phase | Strategy phase | Action phase | Status phase | Agenda phase |
 |---|---|---|---|---|---|
 | 1-8 | Select color (preview only, not locked yet) | Select strategy card 1-8 | -- | -- | -- |
 | 13 | -- | -- | End battle mode | -- | -- |
-| 14 | -- | -- | Pass this round | -- | -- |
+| 14 | -- | -- | Pass this round (on your turn) | -- | -- |
 | 15 | Lock in color choice | Lock in strategy card and hand off | End turn | Mark ready | End agenda (speaker only) |
 | 0 | Start game (any player, only after all locked) | -- | -- | -- | -- |
 
@@ -161,7 +234,7 @@ kb 1 15                 speaker ends agenda -- round resets, moves back to Strat
 |---|---|
 | `effect rainbow` | Start rainbow animation |
 | `effect pulse` | Pulsing glow with slow hue drift |
-| `effect spiral` | Spiral outward from center hex |
+| `effect ripple` | Rings ripple outward from center hex |
 | `effect sparkle` | Random sparkle across all hexes |
 | `effect wave` | Color wave sweeping left to right |
 | `effect none` | Stop animation and clear |
@@ -173,18 +246,25 @@ kb 1 15                 speaker ends agenda -- round resets, moves back to Strat
 
 | File | Purpose |
 |---|---|
-| `TI4_HexRiser.ino` | Main sketch: setup, loop, serial handler, key/hex callbacks |
-| `config.h` | Edit this -- pins, WiFi credentials, brightness limits, debug flags, game constants |
-| `runtime_settings.h` | Live config updated by the settings page |
+| `TI4_HexRiser.ino` | Main sketch: setup, loop, serial handler, key/hex callbacks, LED task (Core 0) |
+| `config.h` | Edit this -- pins, default WiFi credentials, brightness limits, debug flags, game constants |
+| `runtime_settings.h` | Live config updated by the settings page, saved to flash |
 | `game_state.h` | Full game state machine: all phases, player data, key dispatch |
 | `animations.h` | Boot snake animation and center-out phase transition |
 | `led_map.h` | HEX_MAP[61][6][3] mapping hex/side/slot to LED index (0-914) |
 | `hex_neighbors.h` | HEX_NEIGHBORS[61][6] adjacency table |
-| `led_control.h` | FastLED init, per-hex color management, 5 animation effects |
-| `keyboard_control.h` | MCP23017 stub -- follow the IMPLEMENT HERE markers when boards arrive |
-| `web_interface.h` | Web UI served from root |
+| `led_control.h` | FastLED init, per-hex color management, 5 lighting effects |
+| `keyboard_control.h` | Unused stub left from the dropped physical keyboards |
+| `edge_map.h` | Outward-facing hex sides per player for perimeter turn lighting |
+| `home_page.h` | Home page served from root, with the galaxy background |
+| `theme_style.h` | Shared holo button and panel theme served at /theme.css |
+| `projector_page.h` | Full-screen board page served at /projector |
+| `board_script.h` | Board renderer and WebSocket client shared by projector and admin, served at /board.js |
+| `play_page.h` | Player keypad page served at /play |
+| `admin_page.h` | Game master page served at /admin |
 | `settings_page.h` | Settings page HTML served at /settings |
-| `network.h` | WiFi station+AP, HTTP server, poll/cmd/settings routes |
+| `web_server.h` | WiFi station+AP, WebSocket state push, seat claims, command queue |
+| `save_state.h` | Power loss recovery: saves the running game to flash and restores it |
 
 ## LED Map
 
@@ -204,17 +284,10 @@ Where `base = hex_index * 15`. Hex 30 is the center hex.
 ## Wiring Reference
 
 ```
-Arduino Giga R1           SK6812 strip
-GPIO 6 ──────────────── DIN (LED 0 end)
-GND   ──────────────── GND
-                        5V from external PSU
-
-Arduino Giga R1           MCP23017 (x4)
-GPIO 20 (SDA) ────────── SDA
-GPIO 21 (SCL) ────────── SCL
-3.3V ─────────────────── VCC
-GND ──────────────────── GND
-                          A0/A1/A2 sets address (0x20-0x23)
+ESP32-S3-WROOM-1          SK6812 strip
+GPIO 13 ─────────────── DIN (LED 0 end)
+GND     ─────────────── GND
+                         5V from external PSU
 ```
 
 ## Power Notes
@@ -222,17 +295,29 @@ GND ──────────────────── GND
 - At 50% brightness (default 128): approximately 27.5A draw from LEDs
 - At max brightness (200): approximately 44A
 - Minimum recommended PSU: 5V 60A
-- Connect PSU ground to Arduino ground
-- Do not power the LED strip from the Arduino 5V pin
+- Connect PSU ground to ESP32 ground
+- Do not power the LED strip from the ESP32 3.3V or 5V pins
 
 ## Troubleshooting
 
-**LEDs don't light:** Check GPIO 6 data wire, confirm PSU is powered, verify shared GND between PSU and Arduino
+**Serial port not detected:** Use the **USB** port with USB CDC On Boot set to Enabled. On the **UART** port, install the CH343 driver (see USB Ports above).
 
-**Web page won't load:** Confirm you are connected to the correct WiFi; check Serial Monitor for the IP address
+**Compile error about `setTxTimeoutMs`, or no serial output:** The Tools menu settings don't match. Re-apply the board settings in Upload Steps; the IDE resets them to defaults when the sketch folder changes.
 
-**Animation not showing in browser:** Enable "Simulate Hardware" in Settings when testing without the strip connected -- FastLED.show() blocks the loop for ~27ms when driving GPIO with no strip attached, which can interfere with the WiFi stack
+**LEDs don't light:** Check GPIO 13 data wire, confirm PSU is powered, verify shared GND between PSU and ESP32-S3. On ESP32-S3, avoid GPIO 0, 45, 46 (strapping pins) for LED data — GPIO 13 is safe.
 
-**Wrong colors:** Edit `LED_COLOR_ORDER` in `config.h` (try `GRB`, `RGB`, or `BGR`)
+**Web page won't load:** Confirm you are connected to the correct WiFi; check Serial Monitor for the IP address.
 
-**Compile errors:** Confirm FastLED and Adafruit MCP23X17 are installed and the board is set to Giga R1 WiFi
+**WebSocket not connecting:** Hard-refresh the browser (Ctrl+Shift+R). If the board rebooted, the WebSocket client reconnects automatically within a few seconds.
+
+**Animation not showing in browser:** Enable "Simulate Hardware" in Settings when testing without the strip connected.
+
+**Lighting effects lag, then the board resets (`rmt` / `ChannelManager` errors in serial):** FastLED was updated past 3.10.3. Reinstall FastLED 3.10.3 from the Library Manager.
+
+**Wrong colors:** Edit `LED_COLOR_ORDER` in `config.h` (try `GRB`, `RGB`, or `BGR`).
+
+**Compile errors about ESPAsyncWebServer:** Install "ESP Async WebServer" and "Async TCP" by ESP32Async from the Library Manager. The old me-no-dev versions don't build on ESP32 core 3.x.
+
+**Watchdog reset / core panic:** If the LED task triggers a watchdog, increase the `vTaskDelay` in `ledTask()`.
+
+**PSRAM not detected:** Confirm **Tools > PSRAM > OPI PSRAM** is selected in Arduino IDE. The N16R8 module has 8MB Octal SPI PSRAM — if disabled, large buffers may cause heap exhaustion.

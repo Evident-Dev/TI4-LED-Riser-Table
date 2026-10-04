@@ -1,70 +1,84 @@
 // =============================================================================
 // TI4 Hex Riser - Main Firmware
-// Target: Arduino Giga R1 WiFi
+// Target: ESP32-S3-WROOM-1-N16R8
 //
-// Required libraries (Arduino IDE → Library Manager):
-//   1. FastLED           (by Daniel Garcia)
-//   2. Adafruit MCP23X17 (by Adafruit)
+// Required libraries (Arduino IDE -> Library Manager):
+//   1. FastLED 3.10.3       (by Daniel Garcia) - 3.10.5 jams the LED driver
+//   2. ESP Async WebServer  (by ESP32Async)
+//   3. Async TCP            (by ESP32Async)
 //
-// Board: Arduino Giga R1 WiFi
+// Board: ESP32S3 Dev Module
+// CPU: 240 MHz (WiFi), Flash: 16MB QIO 80MHz, Partition: 16M Flash (3MB APP/9.9MB FATFS)
+// PSRAM: OPI PSRAM, USB CDC On Boot: Enabled, USB Mode: Hardware CDC and JTAG
+//
+// Core assignment:
+//   Core 0 — LED task (FastLED.show, ~33 fps) — isolated from WiFi jitter
+//   Core 1 — loop(): game state, web commands, serial commands; state broadcast task
 // =============================================================================
 
-#include "config.h"
-#include "runtime_settings.h"  // must come before led_control/keyboard/network
+#define BOARD_HAS_PSRAM
+#define CONFIG_SPIRAM_CACHE_WORKAROUND
 
-// Include order matters: led_map & hex_neighbors provide data, led_control
-// reads it, game_state uses led_control, web/network use everything.
+#include "config.h"
+#include "runtime_settings.h"
+
 #include "led_map.h"
+#include "edge_map.h"
 #include "hex_neighbors.h"
 #include "led_control.h"
 #include "keyboard_control.h"
 #include "animations.h"
 #include "game_state.h"
-#include "web_interface.h"
-#include "network.h"
+#include "web_server.h"  // renamed from network.h — avoids collision with ESP32 core Network.h
+#include "save_state.h"
 
 // =============================================================================
-// Keyboard press callback — wired to both physical keyboards and serial sim
+// LED Task — runs on Core 0, drives the strip only.
+// initLEDs() is called in setup() before this task is created.
+// =============================================================================
+void ledTask(void *parameter) {
+  for (;;) {
+    updateLEDs();
+    vTaskDelay(1);  // yield; millis gate in updateLEDs() controls actual rate
+  }
+}
+
+// =============================================================================
+// Broadcast Task — runs on Core 1 above loop(), pushes state to the web pages.
+// Kept off the LED task because WebSocket sends can block on a slow client.
+// Still runs while loop() is stuck in a blocking animation (speaker roulette).
+// =============================================================================
+void broadcastTask(void *parameter) {
+  for (;;) {
+    wsBroadcastTick();
+    vTaskDelay(pdMS_TO_TICKS(5));
+  }
+}
+
+// =============================================================================
+// Holds boot until open pages have reconnected and loaded: at least
+// BOOT_SETTLE_MIN_MS, then BOOT_SETTLE_QUIET_MS with no new page loads or
+// socket connects, giving up after BOOT_SETTLE_MAX_MS.
+// =============================================================================
+static void waitForNetworkToSettle() {
+  uint32_t start = millis();
+  while (millis() - start < BOOT_SETTLE_MAX_MS) {
+    bool minimumPassed = (millis() - start >= BOOT_SETTLE_MIN_MS);
+    bool quiet         = (millis() - lastNetworkActivityMs >= BOOT_SETTLE_QUIET_MS);
+    if (minimumPassed && quiet) break;
+    delay(50);
+  }
+}
+
+// =============================================================================
+// Keyboard press callback
 // =============================================================================
 void onKeyPressed(uint8_t playerIndex, uint8_t key) {
   handleGameKey(playerIndex, key);
 }
 
 // =============================================================================
-// Hex selection callback (web UI click)
-// =============================================================================
-void onHexSelected(int hexIdx) {
-  if (hexIdx < 0 || hexIdx >= NUM_HEXES) return;
-  if (rtCfg.debugSerial) {
-    Serial.print(F("Web: hex selected "));
-    Serial.println(hexIdx);
-  }
-
-  // Brief white flash, then restore
-  CRGB prev = hexColor[hexIdx];
-  setHexColor(hexIdx, CRGB::White);
-  pushLEDs();
-  delay(80);
-  setHexColor(hexIdx, prev);
-  pushLEDs();
-}
-
-// =============================================================================
 // Serial command handler
-// =============================================================================
-// Standard commands:
-//   status              — print game state
-//   effect NAME         — start LED effect (rainbow/pulse/spiral/sparkle/wave/none)
-//   bright N            — set brightness 0-200
-//   clear               — clear all hexes
-//   test                — run LED hardware test
-//
-// Game / simulation commands:
-//   kb <1-8> <0-15>     — simulate player N pressing key K
-//   setplayers <4-8>    — set how many players are active (restarts setup phase)
-//   startgame           — GM start: locks all active players and begins
-//   phase <0-4>         — force-jump to phase (0=setup 1=strategy 2=action 3=status 4=agenda)
-//   battle <P1> <P2>    — trigger battle mode between player P1 and P2
 // =============================================================================
 void handleSerialCommand() {
   if (!Serial.available()) return;
@@ -87,18 +101,11 @@ void handleSerialCommand() {
     }
     int playerNum = line.substring(3, spacePos).toInt();
     int keyNum    = line.substring(spacePos + 1).toInt();
-    if (playerNum < 1 || playerNum > 8) {
-      Serial.println(F("Player must be 1-8"));
-      return;
-    }
-    if (keyNum < 0 || keyNum > 15) {
-      Serial.println(F("Key must be 0-15"));
-      return;
-    }
+    if (playerNum < 1 || playerNum > 8) { Serial.println(F("Player must be 1-8")); return; }
+    if (keyNum < 0 || keyNum > 15)      { Serial.println(F("Key must be 0-15"));   return; }
     uint8_t playerIndex = (uint8_t)(playerNum - 1);
     if (!players[playerIndex].active) {
-      Serial.print(F("Player "));
-      Serial.print(playerNum);
+      Serial.print(F("Player ")); Serial.print(playerNum);
       Serial.println(F(" is not active — use 'setplayers N' first"));
       return;
     }
@@ -109,41 +116,34 @@ void handleSerialCommand() {
   // --- setplayers <4-8> ---
   } else if (line.startsWith("setplayers ")) {
     int count = line.substring(11).toInt();
-    if (count < 4 || count > 8) {
-      Serial.println(F("Player count must be 4-8"));
-      return;
-    }
-    for (uint8_t i = 0; i < MAX_PLAYERS; i++) {
-      players[i].active = (i < (uint8_t)count);
-    }
+    if (count < 4 || count > 8) { Serial.println(F("Player count must be 4-8")); return; }
+    clearSavedGame();
+    for (uint8_t i = 0; i < MAX_PLAYERS; i++) players[i].active = (i < (uint8_t)count);
     Serial.print(F("Set ")); Serial.print(count); Serial.println(F(" active players"));
     transitionToSetup();
 
   // --- startgame ---
   } else if (line == "startgame") {
-    // Lock any unlocked active players with their current color
     for (uint8_t i = 0; i < MAX_PLAYERS; i++) {
       if (players[i].active && !players[i].colorLocked) {
         uint8_t colorIdx = players[i].selectedColorIndex;
         if (!gameState.colorTaken[colorIdx]) {
-          players[i].colorLocked          = true;
-          gameState.colorTaken[colorIdx]  = true;
+          players[i].colorLocked         = true;
+          gameState.colorTaken[colorIdx] = true;
         }
       }
     }
-    Serial.println(F("Starting game — speaker selection runs for ~4 seconds, board will respond after"));
+    Serial.println(F("Starting game — speaker roulette running..."));
     selectRandomSpeaker();
     transitionToStrategy();
 
   // --- phase <0-4> ---
   } else if (line.startsWith("phase ")) {
-    String phaseArg = line.substring(6);
-    phaseArg.trim();
-    if (phaseArg.length() == 0 || phaseArg.toInt() < 0 || phaseArg.toInt() > 4) {
+    int phaseNum = line.substring(6).toInt();
+    if (phaseNum < 0 || phaseNum > 4) {
       Serial.println(F("Usage: phase <0-4>  (0=Setup 1=Strategy 2=Action 3=Status 4=Agenda)"));
       return;
     }
-    int phaseNum = phaseArg.toInt();
     switch (phaseNum) {
       case 0: transitionToSetup();    break;
       case 1: transitionToStrategy(); break;
@@ -156,15 +156,11 @@ void handleSerialCommand() {
   // --- battle <P1> <P2> ---
   } else if (line.startsWith("battle ")) {
     int spacePos = line.indexOf(' ', 7);
-    if (spacePos < 0) {
-      Serial.println(F("Usage: battle <player1 1-8> <player2 1-8>"));
-      return;
-    }
+    if (spacePos < 0) { Serial.println(F("Usage: battle <player1 1-8> <player2 1-8>")); return; }
     int p1 = line.substring(7, spacePos).toInt() - 1;
     int p2 = line.substring(spacePos + 1).toInt() - 1;
     if (p1 < 0 || p1 >= MAX_PLAYERS || p2 < 0 || p2 >= MAX_PLAYERS || p1 == p2) {
-      Serial.println(F("Invalid player numbers"));
-      return;
+      Serial.println(F("Invalid player numbers")); return;
     }
     startBattle((uint8_t)p1, (uint8_t)p2);
 
@@ -174,11 +170,11 @@ void handleSerialCommand() {
     effectName.toUpperCase();
     if      (effectName == "RAINBOW") startEffect(ANIM_RAINBOW);
     else if (effectName == "PULSE")   startEffect(ANIM_PULSE);
-    else if (effectName == "SPIRAL")  startEffect(ANIM_SPIRAL);
+    else if (effectName == "RIPPLE")  startEffect(ANIM_RIPPLE);
     else if (effectName == "SPARKLE") startEffect(ANIM_SPARKLE);
     else if (effectName == "WAVE")    startEffect(ANIM_WAVE);
     else if (effectName == "NONE")    stopEffect();
-    else Serial.println(F("Unknown effect. Try: rainbow pulse spiral sparkle wave none"));
+    else Serial.println(F("Unknown effect. Try: rainbow pulse ripple sparkle wave none"));
 
   // --- bright N ---
   } else if (line.startsWith("bright ")) {
@@ -189,7 +185,6 @@ void handleSerialCommand() {
   // --- clear ---
   } else if (line == "clear") {
     setAllHexes(CRGB::Black);
-    pushLEDs();
 
   // --- test ---
   } else if (line == "test") {
@@ -202,16 +197,14 @@ void handleSerialCommand() {
     Serial.print(F("Phase: ")); Serial.println(phaseNames[(int)gameState.currentPhase]);
     Serial.print(F("Active players: ")); Serial.println(gameState.numActivePlayers);
     Serial.print(F("Speaker: P")); Serial.println(gameState.speakerIndex + 1);
-    Serial.print(F("WiFi IP: ")); Serial.println(WiFi.localIP());
+    printNetworkInfo();
     for (uint8_t i = 0; i < MAX_PLAYERS; i++) {
       if (players[i].active) {
         Serial.print(F("  P")); Serial.print(i + 1);
         Serial.print(F(" color=#")); Serial.print(players[i].colorHex, HEX);
         Serial.print(F(" home=")); Serial.print(players[i].homeHex);
         Serial.print(F(" locked=")); Serial.print(players[i].colorLocked ? "Y" : "N");
-        if (players[i].strategyCard > 0) {
-          Serial.print(F(" card=")); Serial.print(players[i].strategyCard);
-        }
+        if (players[i].strategyCard > 0) { Serial.print(F(" card=")); Serial.print(players[i].strategyCard); }
         if (players[i].hasPassed) Serial.print(F(" PASSED"));
         Serial.println();
       }
@@ -231,55 +224,75 @@ void handleSerialCommand() {
 }
 
 // =============================================================================
-// setup()
+// setup() — runs on Core 1
 // =============================================================================
 void setup() {
+  loadRuntimeSettings();
   Serial.begin(115200);
-  uint32_t serialWaitStart = millis();
-  while (!Serial && millis() - serialWaitStart < 2000) {}
-  Serial.setTimeout(500);  // don't block longer than 500ms waiting for a newline
+  Serial.setTimeout(500);
+#if ARDUINO_USB_CDC_ON_BOOT
+  Serial.setTxTimeoutMs(0);  // drop output when no monitor is reading instead of stalling the game
+#endif
+  delay(500);  // let serial settle (ESP32 USB CDC initialises faster than Giga)
 
   if (rtCfg.debugSerial) {
     Serial.println();
     Serial.println(F("=============================="));
-    Serial.println(F(" TI4 Hex Riser v1.0"));
+    Serial.println(F(" TI4 Hex Riser v2.0 - ESP32-S3"));
     Serial.println(F("=============================="));
   }
 
-  // Hardware init
+  // Hardware + network init
   initLEDs();
   initKeyboard();
   setKeyPressCallback(onKeyPressed);
   initNetwork();
 
-  // Game state init — default 6 players for testing (override with 'setplayers N')
+  // Game state — default 6 players; override with 'setplayers N'
   initGameState(6);
+  initSaveState();  // a saved game waits for resume once boot finishes
 
-  // Boot animation, then enter setup phase
+  // Spawn LED task on Core 0 — takes over FastLED.show() from here on
+  xTaskCreatePinnedToCore(
+    ledTask,      // task function
+    "LED_Task",   // name (debug)
+    4096,         // stack size (bytes)
+    NULL,         // parameter
+    2,            // priority (higher = more preemptive)
+    NULL,         // task handle
+    0             // core 0
+  );
+
+  xTaskCreatePinnedToCore(broadcastTask, "Broadcast_Task", 8192, NULL, 2, NULL, 1);
+
+  // Pages reconnecting after a reboot flood the network; let that pass
+  // before the boot animation so it runs smoothly.
+  waitForNetworkToSettle();
   runBootAnimation();
   transitionToSetup();
+  bootComplete = true;
 
   if (rtCfg.debugSerial) {
-    Serial.println(F("Ready. Type 'status' to see game state."));
-    Serial.println(F("Type 'setplayers N' (4-8) to configure player count."));
-    Serial.println(F("Type 'kb <1-8> <0-15>' to simulate key presses."));
+    Serial.println(F("Ready. LED task on Core 0. Type 'status' for game state."));
   }
 }
 
 // =============================================================================
-// loop()
+// loop() — runs on Core 1
+// updateLEDs() removed — LED task on Core 0 handles it.
 // =============================================================================
 void loop() {
   handleSerialCommand();
   handleKeyboard();
-  handleNetwork();
+  drainWebCommands();  // key presses and admin commands from the web pages
   updateGameState();
-  updateLEDs();
+  updateSaveState();
 
-  // Heartbeat LED so you know the board is alive
+  // Heartbeat
   static uint32_t lastHeartbeat = 0;
-  if (millis() - lastHeartbeat > 1000) {
+  if (millis() - lastHeartbeat > 5000) {
     lastHeartbeat = millis();
     digitalWrite(LED_BUILTIN, !digitalRead(LED_BUILTIN));
+    if (rtCfg.debugSerial) Serial.println(F("[ESP32] alive"));
   }
 }

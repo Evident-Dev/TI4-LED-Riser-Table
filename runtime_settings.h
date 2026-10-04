@@ -1,4 +1,5 @@
 #pragma once
+#include <Preferences.h>
 #include "config.h"
 
 // =============================================================================
@@ -56,3 +57,25 @@ RuntimeConfig rtCfg = {
   DEBUG_LED_TEST,
   DEBUG_KEYBOARD_TEST
 };
+
+// Bump when RuntimeConfig changes so old saved bytes are ignored
+#define SETTINGS_FORMAT_VERSION 1
+
+static Preferences settingsStorage;
+
+// Loads saved settings over the config.h defaults. Call first in setup().
+void loadRuntimeSettings() {
+  if (!settingsStorage.begin("ti4settings", true)) return;  // nothing saved yet
+  if (settingsStorage.getUChar("version", 0) == SETTINGS_FORMAT_VERSION &&
+      settingsStorage.getBytesLength("config") == sizeof(RuntimeConfig)) {
+    settingsStorage.getBytes("config", &rtCfg, sizeof(RuntimeConfig));
+  }
+  settingsStorage.end();
+}
+
+void saveRuntimeSettings() {
+  settingsStorage.begin("ti4settings", false);
+  settingsStorage.putBytes("config", &rtCfg, sizeof(RuntimeConfig));
+  settingsStorage.putUChar("version", SETTINGS_FORMAT_VERSION);
+  settingsStorage.end();
+}
