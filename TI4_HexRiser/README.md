@@ -77,18 +77,49 @@ The LED task runs independently at ~60 fps. Game state writes to shared `hexColo
 
 ## Web Interface
 
-- **Brightness slider** - adjusts global LED brightness
-- **Effect buttons** - Rainbow, Pulse, Spiral, Sparkle, Wave, Stop
-- **Side color controls** - set individual hex sides to any color
-- **Player swatches** - shows active player colors and current phase
-- **Settings page** (gear icon) - change WiFi, LED, debug, and display settings at runtime
-- **Reboot button** - in Settings, reboots the board to apply WiFi credential changes
+All live pages share a single WebSocket (`/ws`). The board pushes LED
+state as a binary frame (all 366 hex sides) only when something changes, plus
+a game-state JSON every 300 ms — no polling.
 
-The browser connects via WebSocket for live bidirectional state sync. The indicator dot in the sidebar shows connection status.
+If no game state arrives for 1 second the pages show a **Table offline** splash and keep reconnecting. While the controller boots they show **Table is booting** until the boot animation finishes, and after a restart they reload themselves so they always match the firmware.
+
+| Page | Who | What |
+|---|---|---|
+| `/` | Everyone | Home page with links to Admin, Player and Projector |
+| `/projector` | Projector / TV | Full-screen live board mirror, display only |
+| `/play` (or `/player`) | Players 1-8 | Phone keypad: claim a seat, then a phase-aware pad (color select, strategy cards, end turn / pass / battle, ready, agenda) |
+| `/admin` | Game master | Desktop and mobile. Live board with hex claiming, player count, force start, reset, phase jumps, rules toggles, seat roster with kick, speaker token, battle, lighting |
+| `/settings` | — | WiFi, LED, debug, and display settings at runtime |
+
+### Playing from phones
+
+1. Game master opens `/admin` and sets the player count (this restarts setup and assigns home hexes)
+2. Each player opens `/play` on their phone, enters a name, and grabs an open seat
+3. Seats survive phone screen locks and reconnects — the claim token is stored in the browser
+4. Every keypad press goes through the same `handleGameKey()` path the physical keyboards will use
+
+### Rules options (admin page)
+
+- **Agenda needs custodians** (default on) — the agenda phase is skipped after status until the custodians token leaves Mecatol Rex. Claiming the center hex on the board marks it automatically; the admin can also toggle it.
+- **4 players: 2 cards each** (default on) — in 4-player games each player picks two strategy cards, going around the pick order twice. Initiative is the lowest card held.
+- **Speaker token** — no card grants the speaker token; when Politics changes the speaker, use the crown button on the seat roster.
+- **Turn override** — during the action phase, the Turn button on a seat makes it that player's turn. Play continues in initiative order from them.
+
+## Power Loss Recovery
+
+Once a game has started, the controller saves it to flash whenever something changes: a turn ends, a player passes, a card is locked, a hex is claimed, or the phase changes. A save either completes or leaves the previous one intact, so a power cut mid-save can't corrupt it.
+
+After a power loss, every page shows **Saved game found** with the phase and player count:
+
+- Players and the admin can **Resume**. The admin can also **Start New Game**, which discards the save.
+- On resume, seats come back **reserved**. Each phone stores its seat token with the game ID and rejoins its own seat automatically. Anyone else can still take a reserved seat, so a phone that never comes back doesn't block the game.
+- The active player's turn timer restarts.
+
+The save is cleared by Start New Game, Reset Game, or changing the player count. Nothing is saved during setup, so a new setup never prompts.
 
 ## Settings Page
 
-Navigate to the gear icon at the bottom of the sidebar to access runtime settings. Changes to LED and debug options take effect immediately. WiFi credential changes require a reboot.
+Open Settings from the admin page to change runtime settings. Changes to LED and debug options take effect immediately. WiFi credential changes require a reboot.
 
 | Setting | Description |
 |---|---|
@@ -128,7 +159,7 @@ Each player has a 4x4 keyboard (keys 0-15). What each key does depends on the cu
 |---|---|---|---|---|---|
 | 1-8 | Select color (preview only, not locked yet) | Select strategy card 1-8 | -- | -- | -- |
 | 13 | -- | -- | End battle mode | -- | -- |
-| 14 | -- | -- | Pass this round | -- | -- |
+| 14 | -- | -- | Pass this round (on your turn) | -- | -- |
 | 15 | Lock in color choice | Lock in strategy card and hand off | End turn | Mark ready | End agenda (speaker only) |
 | 0 | Start game (any player, only after all locked) | -- | -- | -- | -- |
 
@@ -201,7 +232,7 @@ kb 1 15                 speaker ends agenda -- round resets, moves back to Strat
 |---|---|
 | `effect rainbow` | Start rainbow animation |
 | `effect pulse` | Pulsing glow with slow hue drift |
-| `effect spiral` | Spiral outward from center hex |
+| `effect ripple` | Rings ripple outward from center hex |
 | `effect sparkle` | Random sparkle across all hexes |
 | `effect wave` | Color wave sweeping left to right |
 | `effect none` | Stop animation and clear |
@@ -222,9 +253,15 @@ kb 1 15                 speaker ends agenda -- round resets, moves back to Strat
 | `hex_neighbors.h` | HEX_NEIGHBORS[61][6] adjacency table |
 | `led_control.h` | FastLED init, per-hex color management, 5 animation effects |
 | `keyboard_control.h` | MCP23017 stub -- follow the IMPLEMENT HERE markers when boards arrive |
-| `web_interface.h` | Web UI served from root |
+| `edge_map.h` | Outward-facing hex sides per player for perimeter turn lighting |
+| `home_page.h` | Home page served from root |
+| `projector_page.h` | Full-screen board page served at /projector |
+| `board_script.h` | Board renderer and WebSocket client shared by projector and admin, served at /board.js |
+| `play_page.h` | Player keypad page served at /play |
+| `admin_page.h` | Game master page served at /admin |
 | `settings_page.h` | Settings page HTML served at /settings |
-| `web_server.h` | WiFi station+AP, AsyncWebServer routes, WebSocket handler |
+| `web_server.h` | WiFi station+AP, WebSocket state push, seat claims, command queue |
+| `save_state.h` | Power loss recovery: saves the running game to flash and restores it |
 
 ## LED Map
 

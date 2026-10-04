@@ -14,6 +14,7 @@
 #define NUM_LEDS       915      // 61 hexes × 15 LEDs each
 #define NUM_HEXES      61
 #define LEDS_PER_HEX   15
+#define LED_MIN_FRAME_MS 30     // 915 LEDs take ~28ms on the wire; frames can't come faster
 
 #define I2C_SDA        21       // MCP23017 I2C SDA (ESP32 default)
 #define I2C_SCL        22       // MCP23017 I2C SCL (ESP32 default)
@@ -74,8 +75,11 @@
 #define TURN_WARNING_MS      300000
 #define BOOT_ANIM_SPEED_MS   100
 #define BOOT_ANIM_TAIL           15
-#define SPEAKER_ROULETTE_LAPS     5
-#define SPEAKER_ROULETTE_STEP_MS 250
+#define BOOT_SETTLE_MIN_MS     2000   // reconnecting pages retry every 1.5 s
+#define BOOT_SETTLE_QUIET_MS   1500
+#define BOOT_SETTLE_MAX_MS    10000
+#define SPEAKER_ROULETTE_LAPS     3
+#define SPEAKER_ROULETTE_MS    4500   // spin time, easing to a stop on the winner
 #define JOIN_FADE_PERIOD_MS   1000
 #define JOIN_FADE_MIN        51
 #define JOIN_FADE_MAX        255
@@ -150,8 +154,10 @@ struct Player {
   bool     hasPassed;
   uint8_t  selectedColorIndex;
   bool     colorLocked;
-  uint8_t  strategyCard;
-  bool     strategyLocked;
+  uint8_t  strategyCard;        // first pick (0 = none)
+  uint8_t  strategyCard2;       // second pick in 4-player games (0 = none)
+  uint8_t  strategyPicksDone;   // locked picks this round (0-2)
+  bool     strategyLocked;      // all required picks locked
   bool     readyForNext;
   uint32_t turnStartMs;
   uint8_t  homeHex;

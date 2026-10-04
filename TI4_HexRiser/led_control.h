@@ -131,7 +131,7 @@ void pushLEDs() {
 void startEffect(AnimEffect effect) {
   if (currentEffect == ANIM_NONE) {
     // Save board state so stopEffect() can restore it
-    memcpy(hexColorSnapshot, hexColor, sizeof(hexColor));
+    memcpy((void*)hexColorSnapshot, (const void*)hexColor, sizeof(hexColor));
     effectSnapshotValid = true;
   }
   currentEffect  = effect;
@@ -142,7 +142,7 @@ void stopEffect() {
   currentEffect = ANIM_NONE;
   FastLED.setBrightness(rtCfg.defaultBrightness);
   if (effectSnapshotValid) {
-    memcpy(hexColor, hexColorSnapshot, sizeof(hexColor));
+    memcpy((void*)hexColor, (const void*)hexColorSnapshot, sizeof(hexColor));
     applyHexColors();
     effectSnapshotValid = false;
   } else {
@@ -261,7 +261,8 @@ void runLEDTest() {
 // -----------------------------------------------------------------------------
 void updateLEDs() {
   uint32_t now = millis();
-  if (now - lastLEDUpdate < rtCfg.ledUpdateMs) return;
+  uint32_t frameMs = max((uint32_t)rtCfg.ledUpdateMs, (uint32_t)LED_MIN_FRAME_MS);
+  if (now - lastLEDUpdate < frameMs) return;
   lastLEDUpdate = now;
 
   if (currentEffect != ANIM_NONE) {
