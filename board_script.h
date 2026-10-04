@@ -354,7 +354,7 @@ const char BOARD_SCRIPT[] = R"=====(
       }
     }
 
-    // Owner's faction icon, just inside the hex's bottom edge
+    // Owner's faction icon in a small hex at the center of the claimed hex
     function refreshClaimIcon(hexIndex, parts) {
       var iconUrl = null, ownerColor = null;
       if (options.claimIcons && currentGame && currentGame.own) {
@@ -372,16 +372,15 @@ const char BOARD_SCRIPT[] = R"=====(
         return;
       }
       if (!parts.claim) {
-        var iconSize = HEX_RADIUS * 0.5;
-        var iconCenterY = parts.centerY + HEX_HEIGHT / 2 - iconSize / 2 - 3;
+        var iconSize = HEX_RADIUS * 0.25;
+        var iconCenterY = parts.centerY;
         parts.claim = document.createElementNS(SVG_NAMESPACE, 'g');
         parts.claim.setAttribute('class', 'hex-claim');
-        var backing = document.createElementNS(SVG_NAMESPACE, 'circle');
-        backing.setAttribute('cx', parts.centerX.toFixed(2));
-        backing.setAttribute('cy', iconCenterY.toFixed(2));
-        backing.setAttribute('r', (iconSize / 2 + 1.5).toFixed(2));
+        var backing = document.createElementNS(SVG_NAMESPACE, 'polygon');
+        backing.setAttribute('points', getCorners(parts.centerX, iconCenterY, iconSize * 0.78)
+          .map(function (point) { return point.x.toFixed(2) + ',' + point.y.toFixed(2); }).join(' '));
         backing.setAttribute('fill', '#05070dd9');
-        backing.setAttribute('stroke-width', '1.5');
+        backing.setAttribute('stroke-width', '1');
         parts.claim.appendChild(backing);
         var icon = document.createElementNS(SVG_NAMESPACE, 'image');
         icon.setAttribute('x', (parts.centerX - iconSize / 2).toFixed(2));

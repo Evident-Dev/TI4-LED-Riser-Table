@@ -17,11 +17,13 @@ const char PROJECTOR_PAGE[] = R"=====(
 <style>
 * { box-sizing: border-box; margin: 0; padding: 0; }
 html, body { height: 100%; background: #05070d; overflow: hidden; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
-#board { display: block; width: 100vw; height: 100vh; padding: 2vmin; }
+body { display: flex; }
 #roster {
-  position: fixed; top: 2.5vmin; left: 2.5vmin; display: flex; flex-direction: column; gap: 1vmin;
+  flex-shrink: 0; display: flex; flex-direction: column; gap: 1vmin; padding: 2.5vmin 0 2.5vmin 2.5vmin;
   font-size: 2vmin; color: #cbd5e1;
 }
+#roster:empty { display: none; }
+#board { display: block; flex: 1; min-width: 0; height: 100vh; padding: 2vmin; }
 .roster-row {
   display: flex; align-items: center; gap: 1.2vmin; padding: 0.8vmin 1.4vmin 0.8vmin 1.2vmin;
   border-left: 0.6vmin solid var(--player-color); background: #0a1726cc;
@@ -35,8 +37,8 @@ html, body { height: 100%; background: #05070d; overflow: hidden; font-family: s
 <script src="/board.js"></script>
 </head>
 <body>
-<svg id="board"></svg>
 <div id="roster"></div>
+<svg id="board"></svg>
 <script>
 var board = createHexBoard(document.getElementById('board'), { claimIcons: true });
 var tableData = null;
